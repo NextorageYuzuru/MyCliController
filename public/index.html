@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude CLI Controller</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="sb-head">
+      <div class="brand"><img src="icon.svg" alt=""> CLI Controller</div>
+      <button id="btnNew" class="btn primary" title="新對話 (Ctrl+N)">＋ 新對話</button>
+    </div>
+    <div class="sb-tools">
+      <input id="search" type="search" placeholder="搜尋對話 / 資料夾…">
+      <button id="btnGroup" class="btn icon" title="切換：依資料夾 / 依時間">▤</button>
+    </div>
+    <div class="seg" id="srcSeg" title="要顯示哪裡開的對話">
+      <button data-src="all">全部</button><button data-src="cli">CLI</button><button data-src="desktop">桌面版</button>
+    </div>
+    <div id="sessionList"></div>
+    <div class="sb-foot">
+      <div class="opts">
+        <label><input type="checkbox" id="chkScratch"> 桌面版暫存</label>
+        <label><input type="checkbox" id="chkHidden"> 已封存</label>
+      </div>
+      <div class="acct">
+        <span id="account">…</span>
+        <span class="grow"></span>
+        <button id="btnAuth" class="btn icon small" title="重新檢查登入狀態">↻</button>
+        <button id="btnLogin" class="btn small" title="開一個 PowerShell 視窗執行 claude auth login">登入</button>
+      </div>
+      <div id="usage">
+        <div class="uhead">
+          <span class="utitle" title="claude CLI 登入帳號的方案用量，和在 claude 裡打 /usage 看到的一樣">用量</span>
+          <span id="uUpdated" class="muted"></span>
+          <span class="grow"></span>
+          <select id="uInterval" title="自動更新間隔（每次更新會送出一個極小的 Haiku 請求，約 650 tokens）">
+            <option value="0">自動：關</option>
+            <option value="1">每 1 分</option>
+            <option value="5">每 5 分</option>
+            <option value="15">每 15 分</option>
+          </select>
+          <button id="uRefresh" class="btn icon small" title="立即更新（送出一個極小的 Haiku 請求，約 650 tokens）">↻</button>
+        </div>
+        <div id="uRows"></div>
+      </div>
+    </div>
+  </aside>
+
+  <main id="main">
+    <header id="chatHead">
+      <div class="hleft">
+        <div id="hTitle" class="htitle" title="雙擊重新命名">新對話</div>
+        <div class="hsub"><span id="hCwd" class="chip" title="在檔案總管開啟"></span><span id="hModel" class="muted small"></span></div>
+      </div>
+      <div class="hright">
+        <button id="btnToolMode" class="btn small toolmode"></button>
+        <button id="btnGallery" class="btn icon" title="圖片面板">🖼</button>
+        <button id="btnTerminal" class="btn icon" title="在 PowerShell 開啟此 session (claude --resume)">⌨</button>
+        <button id="btnPin" class="btn icon" title="釘選">📌</button>
+        <button id="btnHide" class="btn icon" title="封存（從列表收起，勾左下「已封存」可再看到）">🗄</button>
+        <button id="btnDelete" class="btn icon" title="刪除這個對話（移到資源回收筒）">🗑</button>
+      </div>
+    </header>
+    <div id="transcript"></div>
+    <div id="composer">
+      <div id="cmdPop" hidden>
+        <div class="pphead"><span class="pptitle">/ 指令</span><span class="muted small" id="cmdHint"></span></div>
+        <div id="cmdList"></div>
+        <div class="ppfoot"><span class="muted small">↑↓ 選擇 · Enter / Tab 選用（不需參數的指令會直接執行）· Esc 關閉</span></div>
+      </div>
+      <div id="promptPop" hidden>
+        <div class="pphead">
+          <span class="pptitle">⚡ 常用 Prompt</span>
+          <input id="ppSearch" type="search" placeholder="搜尋…">
+        </div>
+        <div id="ppList"></div>
+        <div class="ppfoot">
+          <span class="muted small">↑↓ 選擇 · Enter 插入 · Ctrl+Enter 插入並送出 · Esc 關閉</span>
+          <span class="grow"></span>
+          <button id="ppSaveCur" class="btn small" title="把輸入框目前的內容存成常用 Prompt">把目前輸入存成常用</button>
+          <button id="ppNew" class="btn small primary">＋ 新增</button>
+        </div>
+      </div>
+      <div id="attachments"></div>
+      <div class="inputwrap">
+        <textarea id="input" rows="1" placeholder="輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片)"></textarea>
+      </div>
+      <div class="crow">
+        <label class="sel" title="模型"><span>模型</span>
+          <select id="selModel">
+            <option value="">預設</option>
+            <option value="fable">Fable</option>
+            <option value="opus">Opus</option>
+            <option value="sonnet">Sonnet</option>
+            <option value="haiku">Haiku</option>
+            <option value="__custom">自訂…</option>
+          </select>
+        </label>
+        <label class="sel" title="思考程度 (--effort)"><span>程度</span>
+          <select id="selEffort">
+            <option value="">預設</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+          </select>
+        </label>
+        <label class="sel" title="權限模式 (--permission-mode)"><span>權限</span>
+          <select id="selPerm">
+            <option value="manual">每次詢問</option>
+            <option value="acceptEdits">自動接受編輯</option>
+            <option value="auto">Auto</option>
+            <option value="plan">規劃模式</option>
+            <option value="bypassPermissions">略過所有權限</option>
+          </select>
+        </label>
+        <span class="grow"></span>
+        <span id="ctxMeter" class="ctx" hidden><span class="ctxlabel">Context</span><span class="ctxbar"><i></i></span><span class="ctxnum"></span></span>
+        <button id="btnCmds" class="btn icon slashbtn" title="指令選單（在輸入框開頭打 / 也可以）">/</button>
+        <button id="btnPrompts" class="btn icon" title="常用 Prompt (Ctrl+/，或在輸入框開頭打 //)">⚡</button>
+        <button id="btnAttach" class="btn icon" title="附加圖片">📎</button>
+        <input id="fileInput" type="file" accept="image/*" multiple hidden>
+        <button id="btnStop" class="btn danger" hidden>■ 停止</button>
+        <button id="btnSend" class="btn primary">送出 ➤</button>
+      </div>
+    </div>
+  </main>
+
+  <div id="splitter" hidden></div>
+  <aside id="viewer" hidden>
+    <div class="vhead">
+      <span id="vTitle" class="vtitle"></span>
+      <button id="vFit" class="btn small" title="切換 適合視窗 / 原始尺寸">適合</button>
+      <button id="vReveal" class="btn small" title="在檔案總管顯示">📂</button>
+      <button id="vClose" class="btn icon small" title="關閉">✕</button>
+    </div>
+    <div id="vBody"><div id="vEmpty" class="muted">點對話中的圖片，或圖片路徑連結，就會在這裡顯示。</div><img id="vImg" alt="" hidden></div>
+    <div id="vStrip"></div>
+  </aside>
+</div>
+<div id="promptModal" class="modalbg" hidden>
+  <form id="pmForm" class="modal">
+    <h3 id="pmHead">新增常用 Prompt</h3>
+    <label class="field"><span>名稱 <span class="muted small">（選填，空白會用內容第一行）</span></span><input id="pmTitle" type="text" maxlength="200"></label>
+    <label class="field"><span>內容</span><textarea id="pmText" rows="10" required></textarea></label>
+    <div class="mbtns">
+      <button type="button" id="pmDelete" class="btn danger">刪除</button>
+      <span class="grow"></span>
+      <button type="button" id="pmCancel" class="btn">取消</button>
+      <button type="submit" class="btn primary">儲存 (Ctrl+Enter)</button>
+    </div>
+  </form>
+</div>
+<div id="menu" hidden></div>
+<div id="toast" hidden></div>
+<script src="md.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
