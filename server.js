@@ -907,7 +907,9 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { commands: await getCommands(cwd) });
     }
     if (p === '/api/shutdown' && M === 'POST') { // a newer start of the app wants to take over
-      if (runs.size) return json(res, 409, { busy: true, running: runs.size });
+      // only a turn that is actually running blocks the restart; idle sessions keep their claude process around
+      const busy = [...runs.values()].filter(r => r.turnActive).length;
+      if (busy) return json(res, 409, { busy: true, running: busy });
       json(res, 200, { ok: true });
       log('shutting down: replaced by a new start');
       setTimeout(() => { flushStore(); process.exit(0); }, 100);

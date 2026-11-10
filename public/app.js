@@ -36,7 +36,34 @@ const S = {
   stream: '', loading: false, pending: [], attachments: [], model: '', helloCount: 0, stick: true,
   collapsed: new Set(JSON.parse(ls('cc_collapsed') || '[]')),
 };
-const T = $('#transcript');
+// ---------- panes ----------
+// The content area has one pane (L) or two side by side (L + R, 右側分割視窗). Each pane keeps its own session,
+// draft, transcript and scroll position. The rendering code below works on the globals S / T / tail: the state of
+// the pane being worked on is copied into them (withPane), and copied back out afterwards. The composer at the
+// bottom is shared and always shows the ACTIVE pane (the one the mouse was last pressed in).
+const PANE_KEYS = ['draft', 'cur', 'cwd', 'msgs', 'stream', 'toolEls', 'images', 'showAllMsgs', 'stick', 'ctx', 'model', 'loading', 'pending', 'attachments'];
+const newPaneState = () => ({ draft: null, cur: null, cwd: '', msgs: [], stream: '', toolEls: new Map(), images: [], showAllMsgs: false, stick: true, ctx: null, model: '', loading: false, pending: [], attachments: [], input: '' });
+let T = null, tail = null;      // transcript element and live tail of the pane currently loaded into S
+let CTX = null, ACTIVE = null;  // pane currently loaded into S; pane that has the composer
+const PANE = {};                // PANE.L, PANE.R (built at the bottom of this file)
+function saveTo(p) { for (const k of PANE_KEYS) p.st[k] = S[k]; p.tail = tail; }
+function loadPane(p) { for (const k of PANE_KEYS) S[k] = p.st[k]; T = p.T; tail = p.tail; CTX = p; }
+// run fn with pane p loaded into S/T/tail, then put the previous pane back
+function withPane(p, fn) {
+  if (CTX === p) return fn();
+  const prev = CTX;
+  saveTo(prev); loadPane(p);
+  try { return fn(); }
+  finally { saveTo(p); loadPane(prev); }
+}
+// run fn with the active pane loaded (composer and viewer strip always belong to it)
+const inActive = fn => withPane(ACTIVE, fn);
+// a pane's state, whether or not it is the one loaded right now
+const pst = p => (p === CTX ? S : p.st);
+const panesOn = () => (PANE.R.el.hidden ? [PANE.L] : [PANE.L, PANE.R]);
+const paneShows = (p, sid) => !pst(p).draft && pst(p).cur === sid;
+const shownIds = () => new Set(panesOn().filter(p => !pst(p).draft && pst(p).cur).map(p => pst(p).cur));
+const panesShowing = sid => panesOn().filter(p => paneShows(p, sid));
 
 // ---------- helpers ----------
 function relTime(ts) {
@@ -52,16 +79,16 @@ function relTime(ts) {
 function baseName(p) { return (p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p; }
 function fileUrl(p) { return `/api/file?t=${encodeURIComponent(TOKEN)}&path=${encodeURIComponent(p)}&cwd=${encodeURIComponent(S.cwd || '')}`; }
 function curSession() { return S.sessions.find(s => s.id === S.cur); }
-function nearBottom() { return T.scrollHeight - T.scrollTop - T.clientHeight < 120; }
+function nearEl(e) { return e.scrollHeight - e.scrollTop - e.clientHeight < 120; }
+function nearBottom() { return nearEl(T); }
 function scrollBottom(force) { if (force || S.stick) T.scrollTop = T.scrollHeight; }
-T.addEventListener('scroll', () => { S.stick = nearBottom(); });
 
 // ---------- sidebar ----------
 function visibleSessions() {
   const q = $('#search').value.trim().toLowerCase();
-  const showScratch = S.showScratch, showHidden = S.showHidden, src = S.source;
-  return S.sessions.filter(s => (showHidden || !s.hidden || s.id === S.cur) && (showScratch || !s.scratch || s.id === S.cur) &&
-    (src === 'all' || s.source === src || s.id === S.cur) &&
+  const showScratch = S.showScratch, showHidden = S.showHidden, src = S.source, shown = shownIds();
+  return S.sessions.filter(s => (showHidden || !s.hidden || shown.has(s.id)) && (showScratch || !s.scratch || shown.has(s.id)) &&
+    (src === 'all' || s.source === src || shown.has(s.id)) &&
     (!q || (s.title + ' ' + s.cwd + ' ' + (s.lastPrompt || '')).toLowerCase().includes(q)));
 }
 function renderSidebar() {
@@ -108,18 +135,25 @@ function group(key, label, cwd, items, showFolder) {
 }
 function item(s, showFolder) {
   const run = S.running.has(s.id), wait = S.perms.get(s.id) && S.perms.get(s.id).size;
-  const d = el('div', { class: 'sitem' + (s.id === S.cur ? ' active' : '') + (s.hidden ? ' ishidden' : ''), title: `${s.title}\n${s.cwd}` },
+  const d = el('div', { class: 'sitem' + (shownIds().has(s.id) ? ' active' : '') + (s.hidden ? ' ishidden' : ''), title: `${s.title}\n${s.cwd}` },
     el('span', { class: 'dot' + (wait ? ' wait' : run ? ' run' : '') }),
     el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, S.source === 'all' && s.source === 'desktop' ? el('span', { class: 'srctag', title: '桌面版開的對話' }, '桌面') : null, s.title),
       showFolder ? el('div', { class: 'sfolder muted' }, baseName(s.cwd)) : null),
     el('span', { class: 'stime muted' }, relTime(s.updatedAt)));
-  d.onclick = () => openSession(s.id);
+  d.onclick = () => openHere(s.id);
   d.oncontextmenu = e => { e.preventDefault(); sessionMenu(s, e.clientX, e.clientY); };
   return d;
 }
+// click in the list: if the other pane already shows it, go there; otherwise open it in the active pane
+function openHere(id) {
+  const other = panesOn().find(p => p !== ACTIVE && paneShows(p, id));
+  if (other) setActive(other); else openSession(id, ACTIVE);
+}
 function sessionMenu(s, x, y) {
+  const inR = paneShows(PANE.R, s.id) && !PANE.R.el.hidden;
   showMenu(x, y, [
     ['✎ 重新命名', () => renameSession(s)],
+    [inR ? '✕ 取消右側分割' : '⫽ 放到右側分割視窗', () => (inR ? closeRight() : openRight(s.id))],
     [s.pinned ? '取消釘選' : '📌 釘選', () => patch(s.id, { pinned: !s.pinned })],
     [s.hidden ? '↩ 取消封存' : '🗄 封存', () => archiveSession(s)],
     ['⌨ 在 PowerShell 開啟', () => api('POST', `/api/sessions/${s.id}/terminal`).catch(e => toast(e.message))],
@@ -140,7 +174,7 @@ async function deleteSessionUI(s) {
   if (!confirm(`刪除對話「${s.title}」？\n\n對話紀錄會移到 Windows 資源回收筒，需要的話還可以從那裡還原。${warn}`)) return;
   try { await api('DELETE', `/api/sessions/${s.id}`); }
   catch (e) { toast('刪除失敗: ' + e.message, 6000); return; }
-  if (S.cur === s.id) newDraft(s.cwd);
+  for (const p of panesOn()) if (paneShows(p, s.id)) withPane(p, () => newDraft(s.cwd));
   S.sessions = S.sessions.filter(x => x.id !== s.id); renderSidebar();
   toast('已刪除（在資源回收筒）');
 }
@@ -162,22 +196,23 @@ async function loadSessions() {
   const d = await api('GET', '/api/sessions');
   S.sessions = d.sessions;
   for (const s of S.sessions) if (s.running && !S.running.has(s.id)) S.running.set(s.id, { startedAt: Date.now(), activity: '' });
-  renderSidebar(); renderHead();
+  renderSidebar(); renderHeads();
 }
 
-// ---------- header ----------
+// ---------- header (one per pane) ----------
+function renderHeads() { for (const p of panesOn()) withPane(p, renderHead); }
 function renderHead() {
-  const s = curSession();
-  $('#hTitle').textContent = S.draft ? '新對話' : s ? s.title : '';
-  $('#hCwd').textContent = S.cwd ? S.cwd : '';
-  $('#hCwd').hidden = !S.cwd;
-  $('#hModel').textContent = S.model ? '· ' + S.model : '';
-  for (const id of ['#btnTerminal', '#btnPin', '#btnHide', '#btnDelete']) $(id).disabled = !s || !!S.draft;
+  const s = curSession(), h = CTX.hdr, draft = !!S.draft;
+  h.title.textContent = draft ? '新對話' : s ? s.title : '';
+  h.cwd.textContent = S.cwd ? S.cwd : '';
+  h.cwd.hidden = !S.cwd;
+  h.model.textContent = S.model ? '· ' + S.model : '';
+  for (const b of [h.terminal, h.pin, h.hide, h.del]) b.disabled = !s || draft;
   if (s) {
-    $('#btnPin').classList.toggle('on', s.pinned); $('#btnHide').classList.toggle('on', s.hidden);
-    $('#btnHide').title = s.hidden ? '取消封存' : '封存（從列表收起，⚙ 設定裡可以選擇顯示已封存）';
+    h.pin.classList.toggle('on', s.pinned); h.hide.classList.toggle('on', s.hidden);
+    h.hide.title = s.hidden ? '取消封存' : '封存（從列表收起，⚙ 設定裡可以選擇顯示已封存）';
   }
-  document.title = (s && !S.draft ? s.title + ' — ' : '') + 'CLI Controller';
+  if (CTX === ACTIVE) document.title = (s && !draft ? s.title + ' — ' : '') + 'CLI Controller';
 }
 // context length: how much of the model's context window this session currently fills
 function fmtTok(n) {
@@ -185,7 +220,8 @@ function fmtTok(n) {
   if (n >= 1e3) return Math.round(n / 1e3) + 'K';
   return String(n);
 }
-function renderCtx() {
+function renderCtx() { inActive(renderCtxActive); }
+function renderCtxActive() {
   const m = $('#ctxMeter'), c = !S.draft && S.ctx;
   if (!c || (!c.used && !c.compacted)) { m.hidden = true; return; }
   m.hidden = false;
@@ -206,15 +242,7 @@ function renderCtx() {
       '\n快滿時 Claude 會自動壓縮 (compact) 對話';
 }
 
-$('#hTitle').ondblclick =() => { const s = curSession(); if (s && !S.draft) renameSession(s); };
-$('#hCwd').onclick = () => reveal(S.cwd);
-$('#btnTerminal').onclick = () => S.cur && api('POST', `/api/sessions/${S.cur}/terminal`).then(() => toast('已開啟 PowerShell 視窗')).catch(e => toast(e.message));
-$('#btnPin').onclick = () => { const s = curSession(); if (s) patch(s.id, { pinned: !s.pinned }); };
-$('#btnHide').onclick = () => { const s = curSession(); if (s) archiveSession(s); };
-$('#btnDelete').onclick = () => { const s = curSession(); if (s && !S.draft) deleteSessionUI(s); };
-$('#btnGallery').onclick = () => toggleViewer();
-
-// ---------- composer controls ----------
+// ---------- composer controls (shared; they always belong to the active pane) ----------
 const PERM_MODES = ['auto', 'bypassPermissions'];
 function setSelectors(model, effort, perm) {
   const sm = $('#selModel');
@@ -222,6 +250,13 @@ function setSelectors(model, effort, perm) {
   sm.value = model || '';
   $('#selEffort').value = effort || '';
   $('#selPerm').value = PERM_MODES.includes(perm) ? perm : 'auto'; // older modes (每次詢問 etc.) now run as Auto
+}
+// the selectors show the active pane's session settings (or the defaults for a new conversation)
+function syncSelectors() {
+  inActive(() => {
+    const s = S.draft ? null : curSession();
+    setSelectors(s && s.model != null ? s.model : S.prefs.model, s && s.effort != null ? s.effort : S.prefs.effort, s && s.permissionMode != null ? s.permissionMode : S.prefs.permissionMode);
+  });
 }
 function cfgFromSelectors() { return { model: $('#selModel').value, effort: $('#selEffort').value, permissionMode: $('#selPerm').value }; }
 async function onCfgChange(key, value) {
@@ -273,29 +308,37 @@ $('#main').addEventListener('drop', e => {
 $('#btnAttach').onclick = () => $('#fileInput').click();
 $('#fileInput').onchange = e => { [...e.target.files].forEach(addAttachment); e.target.value = ''; };
 function addAttachment(file) {
-  const fr = new FileReader();
+  const fr = new FileReader(), p = ACTIVE;
   fr.onload = () => {
     const url = fr.result; const m = url.match(/^data:([^;]+);base64,(.*)$/);
     if (!m) return;
     if (!/^image\/(png|jpeg|gif|webp)$/.test(m[1])) { toast('只支援 PNG / JPEG / GIF / WebP'); return; }
-    S.attachments.push({ mediaType: m[1], data: m[2], url, name: file.name || 'image' });
-    renderAttachments();
+    withPane(p, () => { S.attachments.push({ mediaType: m[1], data: m[2], url, name: file.name || 'image' }); renderAttachments(); });
   };
   fr.readAsDataURL(file);
 }
 function renderAttachments() {
-  const a = $('#attachments'); a.innerHTML = '';
-  S.attachments.forEach((at, i) => a.append(el('div', { class: 'att' }, el('img', { src: at.url, onclick: () => openViewer(at.url, at.name) }),
-    el('button', { class: 'x', title: '移除', onclick: () => { S.attachments.splice(i, 1); renderAttachments(); } }, '✕'))));
-  a.hidden = !S.attachments.length;
+  inActive(() => {
+    const a = $('#attachments'); a.innerHTML = '';
+    S.attachments.forEach((at, i) => a.append(el('div', { class: 'att' }, el('img', { src: at.url, onclick: () => openViewer(at.url, at.name) }),
+      el('button', { class: 'x', title: '移除', onclick: () => { S.attachments.splice(i, 1); renderAttachments(); } }, '✕'))));
+    a.hidden = !S.attachments.length;
+  });
+}
+// empty the composer of pane p (its text and attachments); p may be the active pane or not
+function clearComposerOf(p) {
+  if (p === ACTIVE) { input.value = ''; autosize(); } else p.st.input = '';
+  withPane(p, () => { S.attachments = []; renderAttachments(); });
 }
 
 // send(override): with a string, sends that text and leaves the input box and attachments alone (used by the / menu)
 async function send(override) {
   const useInput = typeof override !== 'string';
+  const p = ACTIVE; // the pane this message belongs to, even if the user clicks another pane while it is sent
   const text = useInput ? input.value.trim() : override;
   if (!text && !(useInput && S.attachments.length)) return;
-  const images = useInput ? S.attachments.map(a => ({ mediaType: a.mediaType, data: a.data })) : [];
+  const atts = useInput ? S.attachments.slice() : [];
+  const images = atts.map(a => ({ mediaType: a.mediaType, data: a.data }));
   // commands the app handles itself (/btw, /usage, /context, /clear, /model, /effort, /rename)
   const sc = !images.length && text.match(/^\/([\w:.-]+)(?:\s+([\s\S]*))?$/);
   if (sc && runAppCommand(sc[1].toLowerCase(), (sc[2] || '').trim())) { if (useInput) { input.value = ''; autosize(); } closeCmd(); input.focus(); return; }
@@ -304,18 +347,18 @@ async function send(override) {
       if (!S.cwd) { toast('請先選擇工作資料夾'); return; }
       $('#btnSend').disabled = true;
       const d = await api('POST', '/api/sessions', { cwd: S.cwd, ...cfgFromSelectors() });
-      S.draft = null; S.cur = d.id; S.cwd = d.cwd; S.msgs = []; ls('cc_last', d.id);
-      renderTranscript();
+      withPane(p, () => { S.draft = null; S.cur = d.id; S.cwd = d.cwd; S.msgs = []; renderTranscript(); });
+      ls('cc_last', d.id);
       await loadSessions();
     }
-    const id = S.cur;
+    const id = pst(p).cur;
     if (S.running.has(id)) { // Claude is busy: park it in the queue (like the Desktop app); 插話 sends it in now
-      enqueue(id, text, useInput ? S.attachments.slice() : []);
-      if (useInput) { input.value = ''; autosize(); S.attachments = []; renderAttachments(); }
+      enqueue(id, text, atts);
+      if (useInput) clearComposerOf(p);
       return;
     }
-    if (useInput) { input.value = ''; autosize(); S.attachments = []; renderAttachments(); }
-    S.stick = true;
+    if (useInput) clearComposerOf(p);
+    withPane(p, () => { S.stick = true; });
     await api('POST', `/api/sessions/${id}/send`, { text, images });
   } catch (e) { toast('送出失敗: ' + e.message, 6000); }
   finally { $('#btnSend').disabled = false; input.focus(); }
@@ -323,13 +366,17 @@ async function send(override) {
 $('#btnSend').onclick = () => send();
 $('#btnStop').onclick = () => S.cur && api('POST', `/api/sessions/${S.cur}/stop`).catch(e => toast(e.message));
 function renderComposerState() {
-  const run = S.cur && S.running.has(S.cur) && !S.draft;
-  $('#btnStop').hidden = !run;
-  $('#btnSend').textContent = '送出 ➤';
-  $('#btnSend').title = run ? 'Claude 執行中：送出的訊息會先排隊，這一輪結束後自動送出（排隊中的訊息可以按「插話」馬上送進去）' : '送出 (Enter)';
-  input.placeholder = run ? 'Claude 正在處理… 現在送出會先排隊，這一輪結束後自動送出' : '輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片)';
-  renderQueue();
+  inActive(() => {
+    const run = S.cur && S.running.has(S.cur) && !S.draft;
+    $('#btnStop').hidden = !run;
+    $('#btnSend').textContent = '送出 ➤';
+    $('#btnSend').title = run ? 'Claude 執行中：送出的訊息會先排隊，這一輪結束後自動送出（排隊中的訊息可以按「插話」馬上送進去）' : '送出 (Enter)';
+    input.placeholder = run ? 'Claude 正在處理… 現在送出會先排隊，這一輪結束後自動送出' : '輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片)';
+    renderQueue();
+  });
 }
+// everything the composer shows for the active pane
+function refreshComposer() { inActive(() => { syncSelectors(); renderCtxActive(); renderAttachments(); renderComposerState(); }); }
 
 // ---------- message queue ----------
 // While Claude works, sent messages wait here (per session) and go out by themselves when the turn ends.
@@ -348,7 +395,7 @@ function dequeue(sid, qid) {
   return it;
 }
 function postQueued(sid, it) {
-  S.stick = true;
+  panesShowing(sid).forEach(p => withPane(p, () => { S.stick = true; }));
   return api('POST', `/api/sessions/${sid}/send`, { text: it.text, images: it.atts.map(a => ({ mediaType: a.mediaType, data: a.data })) })
     .catch(e => { toast('送出失敗: ' + e.message, 6000); S.queue.set(sid, [it].concat(qOf(sid))); renderQueue(); });
 }
@@ -356,7 +403,7 @@ function injectQueued(sid, qid) { const it = dequeue(sid, qid); if (it) postQueu
 function editQueued(sid, qid) {
   const it = dequeue(sid, qid); if (!it) return;
   input.value = it.text + (input.value.trim() ? '\n' + input.value : '');
-  S.attachments = it.atts.concat(S.attachments); renderAttachments();
+  inActive(() => { S.attachments = it.atts.concat(S.attachments); renderAttachments(); });
   autosize(); input.focus(); input.selectionStart = input.selectionEnd = it.text.length;
 }
 // turn finished: send everything that waited (the first starts a new run, the rest are taken into that same run)
@@ -365,7 +412,8 @@ async function flushQueue(sid) {
   S.queue.set(sid, []); renderQueue();
   for (const it of list) await postQueued(sid, it);
 }
-function renderQueue() {
+function renderQueue() { inActive(renderQueueActive); }
+function renderQueueActive() {
   const box = $('#queueBox'), list = S.draft ? [] : qOf(S.cur);
   box.innerHTML = ''; box.hidden = !list.length;
   if (!list.length) return;
@@ -383,25 +431,26 @@ function renderQueue() {
 }
 
 // ---------- new session (draft) ----------
+// new conversation in the pane that is loaded (the active one, unless called through withPane)
 function newDraft(cwd) {
-  S.draft = { }; S.cur = null; S.msgs = []; S.model = ''; S.ctx = null; renderCtx();
+  S.draft = { }; S.cur = null; S.msgs = []; S.model = ''; S.ctx = null;
   S.cwd = cwd || S.prefs.lastCwd || '';
-  setSelectors(S.prefs.model, S.prefs.effort, S.prefs.permissionMode);
-  renderSidebar(); renderHead(); renderTranscript(); renderComposerState();
-  input.focus();
+  renderSidebar(); renderHead(); renderTranscript(); refreshComposer();
+  if (CTX === ACTIVE) input.focus();
 }
 function renderDraft() {
   const recent = [];
   for (const s of S.sessions) if (s.cwd && !s.scratch && !recent.some(r => r.toLowerCase() === s.cwd.toLowerCase())) recent.push(s.cwd);
   const pathInput = el('input', { type: 'text', class: 'pathinput', value: S.cwd, placeholder: '貼上資料夾路徑，或按右邊按鈕選擇…' });
-  pathInput.onchange = () => { S.cwd = pathInput.value.trim().replace(/^"|"$/g, ''); renderHead(); };
+  const p = CTX; // this pane's draft; onchange fires on blur, which can happen after the user pressed another pane
+  pathInput.onchange = () => withPane(p, () => { S.cwd = pathInput.value.trim().replace(/^"|"$/g, ''); renderHead(); });
   const box = el('div', { class: 'draft' },
     el('h2', null, '開始新對話'),
     el('div', { class: 'muted' }, '選擇 Claude 要工作的資料夾，然後在下方輸入第一則訊息。'),
     el('div', { class: 'pathrow' }, pathInput,
       el('button', { class: 'btn', onclick: async () => {
         const d = await api('POST', '/api/pick-folder', { initial: S.cwd }).catch(e => (toast(e.message), {}));
-        if (d.path) { S.cwd = d.path; pathInput.value = d.path; renderHead(); renderTranscript(); }
+        if (d.path) withPane(p, () => { S.cwd = d.path; pathInput.value = d.path; renderHead(); renderTranscript(); });
       } }, '📁 選擇資料夾…')),
     recent.length ? el('div', { class: 'recent' }, el('div', { class: 'muted small' }, '最近使用'),
       recent.slice(0, 12).map(c => el('button', { class: 'chip' + (c.toLowerCase() === (S.cwd || '').toLowerCase() ? ' on' : ''), title: c,
@@ -410,40 +459,45 @@ function renderDraft() {
 }
 
 // ---------- open session ----------
-async function openSession(id) {
-  S.draft = null; S.cur = id; S.cwd = (curSession() || {}).cwd || ''; S.model = ''; S.ctx = null; renderCtx();
-  ls('cc_last', id);
-  const s = curSession();
-  setSelectors(s && s.model != null ? s.model : S.prefs.model, s && s.effort != null ? s.effort : S.prefs.effort, s && s.permissionMode != null ? s.permissionMode : S.prefs.permissionMode);
-  renderSidebar(); renderHead(); renderComposerState();
-  T.innerHTML = ''; T.append(el('div', { class: 'loading muted' }, '載入中…'));
-  S.loading = true; S.pending = []; S.showAllMsgs = false;
+// open a session in pane p (default: the active pane)
+async function openSession(id, p = ACTIVE) {
+  withPane(p, () => {
+    S.draft = null; S.cur = id; S.cwd = (curSession() || {}).cwd || ''; S.model = ''; S.ctx = null;
+    if (p === ACTIVE) ls('cc_last', id);
+    renderCtx(); renderSidebar(); renderHead(); refreshComposer();
+    T.innerHTML = ''; T.append(el('div', { class: 'loading muted' }, '載入中…'));
+    S.loading = true; S.pending = []; S.showAllMsgs = false;
+  });
   let d;
   try { d = await api('GET', `/api/sessions/${id}/messages`); }
-  catch (e) { if (S.cur === id) { T.innerHTML = ''; T.append(el('div', { class: 'err' }, '載入失敗: ' + e.message)); } S.loading = false; return; }
-  if (S.cur !== id) return;
-  S.loading = false;
-  S.msgs = d.messages; if (d.cwd) S.cwd = d.cwd;
-  S.ctx = d.ctx || null; renderCtx();
-  S.stream = d.partial || '';
-  if (d.running) S.running.set(id, { startedAt: d.startedAt, activity: d.activity });
-  else S.running.delete(id);
-  const pm = new Map(); for (const p of d.perms || []) pm.set(p.requestId, p); S.perms.set(id, pm);
-  renderTranscript();
-  // replay events that arrived while loading
-  const seen = new Set(S.msgs.map(m => m.uuid));
-  for (const ev of S.pending) { if (ev.type === 'msg' && seen.has(ev.msg.uuid)) continue; handleEvent(ev); }
-  S.pending = [];
-  renderHead(); renderComposerState();
-  S.stick = true; scrollBottom(true);
-  input.focus();
+  catch (e) {
+    withPane(p, () => { if (S.cur === id) { T.innerHTML = ''; T.append(el('div', { class: 'err' }, '載入失敗: ' + e.message)); } S.loading = false; });
+    return;
+  }
+  withPane(p, () => {
+    if (S.cur !== id) return; // the pane was switched to something else while loading
+    S.loading = false;
+    S.msgs = d.messages; if (d.cwd) S.cwd = d.cwd;
+    S.ctx = d.ctx || null; renderCtx();
+    S.stream = d.partial || '';
+    if (d.running) S.running.set(id, { startedAt: d.startedAt, activity: d.activity });
+    else S.running.delete(id);
+    const pm = new Map(); for (const x of d.perms || []) pm.set(x.requestId, x); S.perms.set(id, pm);
+    renderTranscript();
+    // replay events that arrived while loading
+    const seen = new Set(S.msgs.map(m => m.uuid));
+    const pending = S.pending; S.pending = [];
+    for (const ev of pending) { if (ev.type === 'msg' && seen.has(ev.msg.uuid)) continue; handleEvent(ev); }
+    renderHead(); refreshComposer();
+    S.stick = true; scrollBottom(true);
+    if (p === ACTIVE) input.focus();
+  });
 }
 
 // ---------- transcript rendering ----------
-let tail;
 function renderTranscript() {
   T.innerHTML = ''; S.toolEls.clear(); S.images = [];
-  tail = el('div', { id: 'tail' }, el('div', { id: 'stream', class: 'atext md' }), el('div', { id: 'permBox' }), el('div', { id: 'working' }));
+  tail = el('div', { class: 'tail' }, el('div', { class: 'atext md stream' }), el('div', { class: 'permBox' }), el('div', { class: 'working' }));
   if (S.draft) { renderDraft(); renderSideCards(); renderStrip(); return; }
   const msgs = S.msgs, LIMIT = 300;
   const start = S.showAllMsgs ? 0 : Math.max(0, msgs.length - LIMIT);
@@ -604,23 +658,33 @@ function attachResult(b) {
 function setToolMode(v) {
   if (!TOOL_MODES[v] || S.toolMode === v) return;
   S.toolMode = v; ls('cc_toolmode', v);
-  const st = nearBottom(), top = T.scrollTop;
-  renderTranscript();
-  if (st) scrollBottom(true); else T.scrollTop = top;
+  for (const p of panesOn()) withPane(p, () => {
+    const st = nearBottom(), top = T.scrollTop;
+    renderTranscript();
+    if (st) scrollBottom(true); else T.scrollTop = top;
+  });
 }
 
 // live streaming text
 let streamTimer = null;
 function renderStream() {
-  const s = $('#stream'); if (!s) return;
+  const s = tail && tail.querySelector('.stream'); if (!s) return;
   s.innerHTML = S.stream ? window.md(S.stream) : '';
   s.hidden = !S.stream;
 }
-function scheduleStream() { if (streamTimer) return; streamTimer = setTimeout(() => { streamTimer = null; const st = nearBottom(); renderStream(); if (st) scrollBottom(true); }, 80); }
+// one timer for all panes: every pane that is streaming text gets redrawn
+function scheduleStream() {
+  if (streamTimer) return;
+  streamTimer = setTimeout(() => {
+    streamTimer = null;
+    for (const p of panesOn()) if (pst(p).stream) withPane(p, () => { const st = nearBottom(); renderStream(); if (st) scrollBottom(true); });
+  }, 80);
+}
 
-// working indicator
+// working indicator (each pane has its own)
+setInterval(() => { for (const p of panesOn()) withPane(p, renderWorking); }, 1000);
 function renderWorking() {
-  const w = $('#working'); if (!w) return;
+  const w = tail && tail.querySelector('.working'); if (!w) return;
   const r = S.cur && S.running.get(S.cur);
   if (!r || S.draft) { w.hidden = true; w.innerHTML = ''; return; }
   const secs = r.startedAt ? Math.max(0, Math.round((Date.now() - r.startedAt) / 1000)) : 0;
@@ -629,18 +693,18 @@ function renderWorking() {
   w.innerHTML = '';
   w.append(el('span', { class: 'spinner' }), el('span', null, r.activity || '執行中…'), el('span', { class: 'muted' }, ' · ' + t));
 }
-setInterval(renderWorking, 1000);
 
 // permission prompts
 function renderPerms() {
-  const box = $('#permBox'); if (!box) return;
+  const box = tail && tail.querySelector('.permBox'); if (!box) return;
   box.innerHTML = '';
   const pm = S.cur && S.perms.get(S.cur);
   if (!pm || !pm.size) return;
-  for (const p of pm.values()) box.append(permCard(p));
+  for (const p of pm.values()) box.append(permCard({ ...p, sid: S.cur }));
 }
+// answer a permission prompt of session sid (the card can be in either pane, so the session id is passed along)
 function answer(p, body) {
-  api('POST', `/api/sessions/${S.cur}/perm`, { requestId: p.requestId, ...body }).catch(e => toast(e.message));
+  api('POST', `/api/sessions/${p.sid}/perm`, { requestId: p.requestId, ...body }).catch(e => toast(e.message));
 }
 function permCard(p) {
   const i = p.input || {};
@@ -705,9 +769,16 @@ function connect() {
   es.onerror = () => { $('#app').classList.add('offline'); };
   es.onopen = () => { $('#app').classList.remove('offline'); };
 }
+// session events go to every pane showing that session (usually one, sometimes none); the rest is global
 function handleEvent(ev) {
-  if (S.loading && ev.sid && ev.sid === S.cur && ['msg', 'delta', 'result', 'perm', 'permDone', 'ctx'].includes(ev.type)) { S.pending.push(ev); return; }
-  const isCur = ev.sid && ev.sid === S.cur && !S.draft;
+  const shown = ev.sid ? panesShowing(ev.sid) : [];
+  const inShown = fn => shown.forEach(p => withPane(p, fn));
+  const visibleHere = shown.includes(ACTIVE); // the session is on screen in the active pane
+  // while a pane is still loading its transcript, hold back events for it and replay them afterwards
+  if (ev.sid && ['msg', 'delta', 'result', 'perm', 'permDone', 'ctx'].includes(ev.type)) {
+    const loading = shown.find(p => pst(p).loading);
+    if (loading) { pst(loading).pending.push(ev); return; }
+  }
   switch (ev.type) {
     case 'hello': // (re)connected — possibly to a newly started server
       checkVersion(ev.version || null);
@@ -717,54 +788,54 @@ function handleEvent(ev) {
       }
       if (ev.rate) renderRate(ev.rate); if (ev.auth) renderAuth(ev.auth);
       loadSessions().catch(() => {});
-      if (S.helloCount++ && S.cur && !S.draft && !S.loading) openSession(S.cur); // resync after a reconnect
+      if (S.helloCount++) for (const p of panesOn()) { const st = pst(p); if (st.cur && !st.draft && !st.loading) openSession(st.cur, p); } // resync after a reconnect
       break;
     case 'sessions': loadSessions().catch(() => {}); break;
     case 'status':
       if (ev.running) S.running.set(ev.sid, { startedAt: ev.startedAt, activity: '啟動中…' });
       else {
-        S.running.delete(ev.sid); S.perms.delete(ev.sid); if (isCur) { S.stream = ''; renderStream(); renderPerms(); }
+        S.running.delete(ev.sid); S.perms.delete(ev.sid);
+        inShown(() => { S.stream = ''; renderStream(); renderPerms(); });
         // turn over: send what queued up — unless the user pressed ■ 停止, then keep it for them to decide
         if (S.stoppedRuns.delete(ev.sid)) { if (qOf(ev.sid).length) toast('已停止；排隊中的訊息保留著，可以按「送出」或編輯'); }
         else flushQueue(ev.sid);
       }
-      renderSidebar(); if (isCur) { renderComposerState(); renderWorking(); }
+      renderSidebar(); inShown(() => { renderComposerState(); renderWorking(); });
       break;
-    case 'activity': { const r = S.running.get(ev.sid); if (r) r.activity = ev.text; if (isCur) renderWorking(); break; }
-    case 'init': if (isCur) { S.model = ev.model; renderHead(); } break;
-    case 'ctx': if (isCur) { S.ctx = ev.ctx; renderCtx(); } break;
+    case 'activity': { const r = S.running.get(ev.sid); if (r) r.activity = ev.text; inShown(renderWorking); break; }
+    case 'init': inShown(() => { S.model = ev.model; renderHead(); }); break;
+    case 'ctx': inShown(() => { S.ctx = ev.ctx; renderCtx(); }); break;
     case 'msg':
-      if (!isCur) break;
-      { const st = nearBottom() || S.stick;
+      inShown(() => {
+        const st = nearBottom() || S.stick;
         S.msgs.push(ev.msg);
         if (ev.msg.role === 'assistant') { S.stream = ''; renderStream(); }
         T.querySelector('.empty') && T.querySelector('.empty').remove();
         appendMsg(ev.msg); renderStrip();
         if (ev.injected) insert(el('div', { class: 'sysline muted injnote', 'data-uuid': ev.msg.uuid }, '↳ 插話：Claude 會在目前這一步完成後看到'));
         else if (ev.queued) insert(el('div', { class: 'sysline muted injnote' }, '↳ 已排入佇列，這一輪結束後送出（伺服器是舊版，重開 App 後才能直接插話）'));
-        if (st) scrollBottom(true); }
+        if (st) scrollBottom(true);
+      });
       break;
     case 'consumed': // claude took in a message that was sent while it was working
-      if (!isCur) break;
-      { const n = T.querySelector(`.injnote[data-uuid="${ev.uuid}"]`); if (n) { n.textContent = '✓ Claude 已收到這則插話'; n.classList.add('ok'); } }
+      inShown(() => { const n = T.querySelector(`.injnote[data-uuid="${ev.uuid}"]`); if (n) { n.textContent = '✓ Claude 已收到這則插話'; n.classList.add('ok'); } });
       break;
     case 'delta':
-      if (!isCur) break;
-      if (ev.reset) S.stream = ''; else S.stream += ev.text || '';
+      inShown(() => { if (ev.reset) S.stream = ''; else S.stream += ev.text || ''; });
       scheduleStream();
       break;
     case 'perm': {
       if (!S.perms.has(ev.sid)) S.perms.set(ev.sid, new Map());
       S.perms.get(ev.sid).set(ev.perm.requestId, ev.perm);
       renderSidebar();
-      if (isCur) { renderPerms(); scrollBottom(true); }
-      else notify('Claude 需要你的許可', (S.sessions.find(s => s.id === ev.sid) || {}).title || '');
+      inShown(() => { renderPerms(); scrollBottom(true); });
+      if (!visibleHere) notify('Claude 需要你的許可', (S.sessions.find(s => s.id === ev.sid) || {}).title || '');
       break;
     }
-    case 'permDone': { const pm = S.perms.get(ev.sid); if (pm) pm.delete(ev.requestId); renderSidebar(); if (isCur) renderPerms(); break; }
+    case 'permDone': { const pm = S.perms.get(ev.sid); if (pm) pm.delete(ev.requestId); renderSidebar(); inShown(renderPerms); break; }
     case 'result':
       if ((ev.result || {}).stopped) S.stoppedRuns.add(ev.sid);
-      if (isCur) {
+      inShown(() => {
         const r = ev.result || {}; S.stream = ''; renderStream();
         let node;
         if (r.stopped) node = el('div', { class: 'result muted' }, '■ 已停止');
@@ -776,14 +847,15 @@ function handleEvent(ev) {
           node = el('div', { class: 'result muted' }, parts.join(' · '));
         }
         const st = nearBottom(); insert(node); if (st) scrollBottom(true);
-      } else if (!(ev.result || {}).stopped) notify('Claude 完成了', (S.sessions.find(s => s.id === ev.sid) || {}).title || '');
+      });
+      if (!visibleHere && !(ev.result || {}).stopped) notify('Claude 完成了', (S.sessions.find(s => s.id === ev.sid) || {}).title || '');
       break;
     case 'rate': renderRate(ev.rate); break;
     case 'auth': renderAuth(ev.auth); break;
     case 'prompts': loadPrompts(); break;
     case 'notice': // e.g. a message that will go out once the previous claude process has exited
       toast(ev.text, 6000);
-      if (isCur) insert(el('div', { class: 'sysline muted' }, ev.text));
+      inShown(() => insert(el('div', { class: 'sysline muted' }, ev.text)));
       break;
   }
 }
@@ -871,16 +943,19 @@ function toggleViewer() {
   else closeViewer();
 }
 function closeViewer() { $('#viewer').hidden = true; $('#splitter').hidden = true; }
+// the strip lists the images of the active pane's conversation
 function renderStrip() {
-  const s = $('#vStrip'); if ($('#viewer').hidden) return;
-  s.innerHTML = '';
-  for (const im of S.images) {
-    const t = el('img', { src: im.src, title: im.label || '', class: vCur && vCur.src === im.src ? 'on' : '' });
-    t.onclick = () => openViewer(im.src, im.label, im.filePath);
-    t.onerror = () => t.remove();
-    s.append(t);
-  }
-  s.hidden = !S.images.length;
+  inActive(() => {
+    const s = $('#vStrip'); if ($('#viewer').hidden) return;
+    s.innerHTML = '';
+    for (const im of S.images) {
+      const t = el('img', { src: im.src, title: im.label || '', class: vCur && vCur.src === im.src ? 'on' : '' });
+      t.onclick = () => openViewer(im.src, im.label, im.filePath);
+      t.onerror = () => t.remove();
+      s.append(t);
+    }
+    s.hidden = !S.images.length;
+  });
 }
 $('#vClose').onclick = closeViewer;
 $('#vFit').onclick = () => { const b = $('#vBody'); b.classList.toggle('actual'); $('#vFit').textContent = b.classList.contains('actual') ? '原尺寸' : '適合'; };
@@ -901,13 +976,13 @@ $('#vReveal').onclick = () => {
   });
 })();
 
-// clicks inside the transcript: image links, code copy
-T.addEventListener('click', e => {
+// clicks inside a transcript (every pane has one, see buildPane): image links, code copy
+function onTranscriptClick(e) {
   const a = e.target.closest('.imglink');
   if (a) { e.preventDefault(); openViewer(fileUrl(a.dataset.path), a.dataset.path, a.dataset.path); return; }
   const c = e.target.closest('.copy');
   if (c) { const code = c.closest('.code').querySelector('code').textContent; navigator.clipboard.writeText(code); c.textContent = '已複製'; setTimeout(() => (c.textContent = '複製'), 1200); }
-});
+}
 
 // ---------- slash commands ----------
 // Commands the app handles itself. Everything else typed as /xxx is sent to claude, which runs it (skills, /compact…).
@@ -1041,7 +1116,7 @@ function sideCardEl(c) {
 }
 function renderSideCards() { for (const c of sideList()) placeCard(sideCardEl(c)); }
 function sideRun(title, req) {
-  const key = cmdKeyCwd();
+  const p = CTX, key = cmdKeyCwd();
   const c = { id: crypto.randomUUID(), key, title, kind: req.kind, state: 'run', text: '', isError: false };
   sideList(key).push(c);
   placeCard(sideCardEl(c)); S.stick = true; scrollBottom(true);
@@ -1049,12 +1124,12 @@ function sideRun(title, req) {
   api('POST', '/api/side', req)
     .then(r => { c.text = r.text; c.isError = !!r.isError; })
     .catch(e => { c.text = e.message; c.isError = true; })
-    .finally(() => {
+    .finally(() => withPane(p, () => {
       c.state = 'done'; c.secs = Math.round((Date.now() - t0) / 1000);
       const old = document.getElementById('side-' + c.id);
       if (old && key === cmdKeyCwd()) { const st = nearBottom(); old.replaceWith(sideCardEl(c)); if (st) scrollBottom(true); }
       else if (c.kind === 'btw') toast('btw 的回答好了，切回那個對話就看得到');
-    });
+    }));
 }
 $('#btnCmds').onclick = () => {
   if (cmd.open) { closeCmd(); return; }
@@ -1278,6 +1353,82 @@ document.addEventListener('keydown', e => {
   if (e.ctrlKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); newDraft(); }
 });
 setInterval(() => { if (document.visibilityState === 'visible') renderSidebar(); }, 60000);
+
+// ---------- panes: build, focus, 右側分割視窗 ----------
+// Each pane gets its own header and transcript from the <template>. Pressing the mouse anywhere in a pane
+// (including blank space) makes it the active pane: the composer, the viewer strip and the list selection follow it.
+function buildPane(key) {
+  const node = $('#paneTpl').content.firstElementChild.cloneNode(true);
+  node.dataset.pane = key;
+  const q = sel => node.querySelector(sel);
+  const p = {
+    key, el: node, T: q('.transcript'), tail: null, st: newPaneState(),
+    hdr: { title: q('[data-role=title]'), cwd: q('[data-role=cwd]'), model: q('[data-role=model]'), gallery: q('[data-act=gallery]'),
+      terminal: q('[data-act=terminal]'), pin: q('[data-act=pin]'), hide: q('[data-act=hide]'), del: q('[data-act=delete]'), splitClose: q('[data-act=split-close]') },
+  };
+  // header buttons act on this pane's session (the pane is made active by the mousedown before the click)
+  const run = fn => () => withPane(p, fn);
+  const h = p.hdr;
+  h.title.ondblclick = run(() => { const s = curSession(); if (s && !S.draft) renameSession(s); });
+  h.cwd.onclick = run(() => reveal(S.cwd));
+  h.gallery.onclick = run(() => toggleViewer());
+  h.terminal.onclick = run(() => S.cur && api('POST', `/api/sessions/${S.cur}/terminal`).then(() => toast('已開啟 PowerShell 視窗')).catch(e => toast(e.message)));
+  h.pin.onclick = run(() => { const s = curSession(); if (s) patch(s.id, { pinned: !s.pinned }); });
+  h.hide.onclick = run(() => { const s = curSession(); if (s) archiveSession(s); });
+  h.del.onclick = run(() => { const s = curSession(); if (s && !S.draft) deleteSessionUI(s); });
+  h.splitClose.onclick = () => closeRight();
+  h.splitClose.hidden = key === 'L';
+  p.T.addEventListener('scroll', () => { const st = nearEl(p.T); if (p === CTX) S.stick = st; else p.st.stick = st; });
+  p.T.addEventListener('click', onTranscriptClick);
+  node.addEventListener('mousedown', () => setActive(p), true);
+  return p;
+}
+function updateFocusMarks() {
+  PANE.L.el.classList.toggle('focused', ACTIVE === PANE.L);
+  PANE.R.el.classList.toggle('focused', ACTIVE === PANE.R);
+}
+function updateSplit() {
+  $('#panes').classList.toggle('split', !PANE.R.el.hidden);
+  updateFocusMarks();
+  renderSidebar();
+}
+// make pane p the one the composer belongs to
+function setActive(p) {
+  if (p === ACTIVE || p.el.hidden) return;
+  const old = ACTIVE;
+  old.st.input = input.value; // keep what was typed in the pane we leave
+  saveTo(old);
+  closeCmd(); closePop();
+  ACTIVE = p; loadPane(p);
+  input.value = p.st.input || ''; autosize();
+  if (S.cur && !S.draft) ls('cc_last', S.cur);
+  updateFocusMarks();
+  refreshComposer(); renderStrip(); renderHead();
+  input.focus();
+}
+// 右側分割視窗: show a session in the right pane (replaces whatever was there; at most two panes)
+function openRight(sid) {
+  if (paneShows(PANE.L, sid)) { toast('這個對話已經在左側開著'); return; }
+  const R = PANE.R;
+  if (R.el.hidden) { R.el.hidden = false; updateSplit(); }
+  openSession(sid, R);
+  setActive(R);
+}
+function closeRight() {
+  const R = PANE.R;
+  if (R.el.hidden) return;
+  if (ACTIVE === R) setActive(PANE.L);
+  R.st = newPaneState(); R.tail = null; R.T.innerHTML = '';
+  R.el.hidden = true;
+  updateSplit();
+}
+
+PANE.L = buildPane('L');
+PANE.R = buildPane('R');
+PANE.R.el.hidden = true;
+$('#panes').append(PANE.L.el, PANE.R.el);
+ACTIVE = PANE.L; loadPane(PANE.L);
+updateFocusMarks();
 
 (async function init() {
   if (!TOKEN) { document.body.innerHTML = '<p style="padding:2em">缺少存取權杖。請用 start.vbs 啟動。</p>'; return; }

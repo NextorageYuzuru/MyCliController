@@ -45,20 +45,27 @@
   </aside>
 
   <main id="main">
-    <header id="chatHead">
-      <div class="hleft">
-        <div id="hTitle" class="htitle" title="雙擊重新命名">新對話</div>
-        <div class="hsub"><span id="hCwd" class="chip" title="在檔案總管開啟"></span><span id="hModel" class="muted small"></span></div>
-      </div>
-      <div class="hright">
-        <button id="btnGallery" class="btn icon" title="圖片面板">🖼</button>
-        <button id="btnTerminal" class="btn icon" title="在 PowerShell 開啟此 session (claude --resume)">⌨</button>
-        <button id="btnPin" class="btn icon" title="釘選">📌</button>
-        <button id="btnHide" class="btn icon" title="封存（從列表收起，⚙ 設定裡可以選擇顯示已封存）">🗄</button>
-        <button id="btnDelete" class="btn icon" title="刪除這個對話（移到資源回收筒）">🗑</button>
-      </div>
-    </header>
-    <div id="transcript"></div>
+    <!-- content area: one pane, or two side by side (右側分割視窗). Each pane has its own header and transcript. -->
+    <div id="panes"></div>
+    <template id="paneTpl">
+      <section class="pane">
+        <header class="chatHead">
+          <div class="hleft">
+            <div class="htitle" data-role="title" title="雙擊重新命名">新對話</div>
+            <div class="hsub"><span class="chip hcwd" data-role="cwd" title="在檔案總管開啟"></span><span class="muted small" data-role="model"></span></div>
+          </div>
+          <div class="hright">
+            <button class="btn icon" data-act="gallery" title="圖片面板">🖼</button>
+            <button class="btn icon" data-act="terminal" title="在 PowerShell 開啟此 session (claude --resume)">⌨</button>
+            <button class="btn icon" data-act="pin" title="釘選">📌</button>
+            <button class="btn icon" data-act="hide" title="封存（從列表收起，⚙ 設定裡可以選擇顯示已封存）">🗄</button>
+            <button class="btn icon" data-act="delete" title="刪除這個對話（移到資源回收筒）">🗑</button>
+            <button class="btn icon" data-act="split-close" title="關閉右側分割視窗">✕</button>
+          </div>
+        </header>
+        <div class="transcript"></div>
+      </section>
+    </template>
     <div id="composer">
       <div id="cmdPop" hidden>
         <div class="pphead"><span class="pptitle">/ 指令</span><span class="muted small" id="cmdHint"></span></div>
