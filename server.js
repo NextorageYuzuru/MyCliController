@@ -19,10 +19,17 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const ARGV = new Set(process.argv.slice(2));
 const NO_OPEN = ARGV.has('--no-open');
 const KEEP_ALIVE = ARGV.has('--keep-alive');
-const IDLE_EXIT_MS = 120000; // exit when no window is open and nothing is running
+// Exit this long after the last window closed, if nothing is running. Short, but long enough that reloading
+// the page (F5), which briefly drops the connection, does not stop the server.
+const IDLE_EXIT_MS = 15000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const IMG_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
-const STATIC_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
+const STATIC_TYPES = { '.json': 'application/json; charset=utf-8', '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
+
+// Internal version (public/version.json), bumped on every change. Read once at start: this is the version of the
+// code this server process runs. The page compares it with the file on disk and warns when the server is older.
+let APP_VERSION = '?';
+try { APP_VERSION = JSON.parse(fs.readFileSync(path.join(PUBLIC_DIR, 'version.json'), 'utf8')).version || '?'; } catch {}
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const LOG_FILE = path.join(DATA_DIR, 'server.log');
@@ -196,7 +203,7 @@ async function listSessions() {
       updatedAt: Math.max((s && s.mtime) || 0, r.updatedAt || 0, r.createdAt || 0),
       // archived/deleted in Claude Desktop => hidden by default; an explicit hide/unhide here wins
       pinned: !!r.pinned, hidden: r.hidden != null ? !!r.hidden : archived, archived, source, app: !!r.createdAt, scratch: isScratch(cwd),
-      running: runs.has(id),
+      running: !!(runs.get(id) && runs.get(id).turnActive),
       model: r.model ?? null, effort: r.effort ?? null, permissionMode: r.permissionMode ?? null,
     });
   }
@@ -384,23 +391,54 @@ async function sendMessage(id, text, images) {
   r.updatedAt = Date.now(); saveStore();
 
   let run = runs.get(id);
-  if (run && !run.exited) { // claude is busy: queue, sent right after the current turn finishes
-    run.queue.push(userLine); run.live.push(liveMsg);
-    broadcast({ type: 'msg', sid: id, msg: liveMsg, queued: true });
+  // claude's input was already closed (its process is on the way out): give it a moment to exit, then start fresh.
+  // If it is still alive after that, something keeps it busy: send this once it has exited instead of losing it.
+  if (run && !run.exited && run.inputClosed) {
+    await Promise.race([run.closed, new Promise(r => setTimeout(r, 5000))]);
+    run = runs.get(id);
+    if (run && !run.exited) {
+      run.afterExit.push({ text, images });
+      broadcast({ type: 'notice', sid: id, text: 'Claude 這個對話的程式還在結束中，這則訊息會在它結束後自動送出' });
+      return { deferred: true };
+    }
+  }
+  if (run && !run.exited) {
+    // claude's process is still alive: write it in right away, like the Desktop app does.
+    // - mid-turn: claude picks it up as soon as the current step finishes and answers within the same turn (插話)
+    // - turn over but the process lives on (e.g. a background task is running): it starts a new turn at once
+    clearTimeout(run.idleTimer);
+    const injecting = run.turnActive;
+    run.written++; run.pending.push(liveMsg.uuid); run.live.push(liveMsg);
+    try { run.proc.stdin.write(userLine); } catch {}
+    if (!injecting) markActive(run);
+    broadcast({ type: 'msg', sid: id, msg: liveMsg, injected: injecting });
     return;
   }
   const fp = await findFile(id);
   const exists = !!fp && fs.existsSync(fp);
   const startOffset = exists ? (await fsp.stat(fp)).size : 0;
-  const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-prompt-tool', 'stdio'];
+  // --replay-user-messages: claude echoes each message we write once it actually takes it in, so we know when
+  // everything sent mid-turn has been consumed and the input can be closed.
+  const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--replay-user-messages', '--permission-prompt-tool', 'stdio'];
   args.push(exists ? '--resume' : '--session-id', id);
-  if (r.model) args.push('--model', r.model);
-  if (r.effort) args.push('--effort', r.effort);
-  if (r.permissionMode) args.push('--permission-mode', r.permissionMode);
+  // A session with no setting of its own (e.g. one started in the CLI or Desktop) uses the app defaults —
+  // the same values the selectors show. Without this, claude fell back to its own default ("ask every time").
+  const model = r.model != null ? r.model : store.prefs.model;
+  const effort = r.effort != null ? r.effort : store.prefs.effort;
+  // only two modes are offered: Auto and 略過所有權限; anything older (manual, acceptEdits, plan) runs as Auto
+  const PERM_MODES = ['auto', 'bypassPermissions'];
+  const permissionMode = PERM_MODES.includes(r.permissionMode) ? r.permissionMode : PERM_MODES.includes(store.prefs.permissionMode) ? store.prefs.permissionMode : 'auto';
+  if (model) args.push('--model', model);
+  if (effort) args.push('--effort', effort);
+  args.push('--permission-mode', permissionMode);
   log('spawn', r.cwd, args.join(' '));
   const proc = spawn(CLAUDE_BIN, args, { cwd: r.cwd, env: cleanEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-  run = { id, proc, live: [liveMsg], partial: '', perms: new Map(), queue: [], startOffset, file: exists ? fp : null,
-    startedAt: Date.now(), activity: '啟動中…', stderr: '', exited: false, gotResult: false, stopped: false };
+  // turnActive: a turn is in progress (what the UI shows as "running"). The process can outlive a turn while
+  // background tasks (run_in_background, Monitor…) keep going; bgTasks mirrors claude's own list of them.
+  run = { id, proc, live: [liveMsg], partial: '', perms: new Map(), written: 1, consumed: 0, pending: [liveMsg.uuid], startOffset, file: exists ? fp : null,
+    startedAt: Date.now(), activity: '啟動中…', stderr: '', exited: false, gotResult: false, stopped: false,
+    turnActive: true, bgTasks: [], afterExit: [] };
+  run.closed = new Promise(res => { run.resolveClosed = res; });
   runs.set(id, run);
   let buf = '';
   proc.stdout.setEncoding('utf8');
@@ -507,12 +545,37 @@ async function runSide(b) {
   });
 }
 
+// A turn starts (our message, or claude reporting a finished background task on its own) / ends (its result).
+function markActive(run) {
+  if (run.turnActive || run.exited) return;
+  run.turnActive = true; run.startedAt = Date.now(); clearTimeout(run.idleTimer);
+  setActivity(run, '執行中…');
+  broadcast({ type: 'status', sid: run.id, running: true, startedAt: run.startedAt });
+  broadcast({ type: 'sessions' });
+}
+function markIdle(run) {
+  if (!run.turnActive) return;
+  run.turnActive = false;
+  const r = rec(run.id); r.updatedAt = Date.now(); saveStore();
+  broadcast({ type: 'status', sid: run.id, running: false, bg: run.bgTasks.length });
+  broadcast({ type: 'sessions' });
+}
+// Idle with nothing left to take in: let the process end — unless background tasks still run in it. Then keep its
+// input open, so a new message starts a turn right away and claude can report when the task finishes.
+function maybeCloseInput(run) {
+  if (run.exited || run.inputClosed || run.turnActive || run.consumed < run.written) return;
+  clearTimeout(run.idleTimer);
+  if (run.stopped || !run.bgTasks.length) closeInput(run);
+  else setActivity(run, `背景工作執行中（${run.bgTasks.length}）`);
+}
+
 function handleLine(run, line) {
   let o; try { o = JSON.parse(line); } catch { return; }
   const sid = run.id;
   switch (o.type) {
     case 'stream_event': {
       if (o.parent_tool_use_id) return;
+      markActive(run);
       const ev = o.event || {};
       if (ev.type === 'content_block_start') {
         run.partial = '';
@@ -528,7 +591,15 @@ function handleLine(run, line) {
       return;
     }
     case 'assistant': case 'user': {
+      if (o.isReplay && !o.parent_tool_use_id) { // claude took in one of the messages we wrote (in order)
+        run.consumed++;
+        const uuid = run.pending.shift();
+        if (uuid) broadcast({ type: 'consumed', sid, uuid });
+        if (run.consumed > 1) setActivity(run, '已收到你插入的訊息…');
+        return;
+      }
       if (o.parent_tool_use_id || o.isReplay || !o.message) return;
+      markActive(run);
       if (o.type === 'assistant' && o.message.usage && o.message.model !== '<synthetic>') {
         const n = ctxUsed(o.message.usage);
         if (n && (!run.ctx || run.ctx.used !== n || run.ctx.model !== o.message.model)) setRunCtx(run, { used: n, model: o.message.model || null });
@@ -564,10 +635,18 @@ function handleLine(run, line) {
         text: o.is_error ? (o.result || (o.errors || []).join('\n') || o.subtype || '') : '' };
       if (run.stopped) { res.isError = false; res.stopped = true; }
       broadcast({ type: 'result', sid, result: res });
+      // the result tells us about the login: a success while we think we're logged out, or an auth error → re-check
+      if ((!res.isError && authInfo && !authInfo.loggedIn) || (res.isError && /log ?in|auth|401|unauthori|credential|token/i.test(res.text))) scheduleAuth(200);
       learnWindow(run, o.modelUsage);
       if (run.ctx) setRunCtx(run, run.ctx);
-      if (run.queue.length && !run.stopped) { setActivity(run, '處理下一則訊息…'); try { run.proc.stdin.write(run.queue.shift()); } catch {} }
-      else { try { run.proc.stdin.end(); } catch {} }
+      // The turn is over once claude has taken in everything we wrote; a message that arrived just as the turn
+      // ended is still waiting and claude runs another turn for it (the timer is a safety net for that case).
+      if (run.stopped || run.consumed >= run.written) { markIdle(run); maybeCloseInput(run); if (run.stopped) closeInput(run); }
+      else {
+        setActivity(run, '處理你插入的訊息…');
+        clearTimeout(run.idleTimer);
+        run.idleTimer = setTimeout(() => { markIdle(run); maybeCloseInput(run); }, 120000);
+      }
       return;
     }
     case 'rate_limit_event':
@@ -582,14 +661,24 @@ function handleLine(run, line) {
         setRunCtx(run, { used: cm.post_tokens || cm.postTokens || null, model: run.ctx && run.ctx.model, compacted: true });
       }
       else if (o.subtype === 'status' && o.status === 'compacting') setActivity(run, '壓縮對話中…');
+      else if (o.subtype === 'background_tasks_changed') {
+        run.bgTasks = Array.isArray(o.tasks) ? o.tasks : [];
+        if (!run.turnActive) {
+          if (run.bgTasks.length) setActivity(run, `背景工作執行中（${run.bgTasks.length}）`);
+          // all background work done: claude usually starts a turn by itself to report it; give it time, then end
+          else { clearTimeout(run.idleTimer); run.idleTimer = setTimeout(() => maybeCloseInput(run), 30000); }
+        }
+      }
       return;
   }
 }
 
+function closeInput(run) { run.inputClosed = true; try { run.proc.stdin.end(); } catch {} }
 function finish(run, code) {
   if (run.exited) return;
   run.exited = true;
-  clearTimeout(run.killTimer);
+  if (run.resolveClosed) setImmediate(run.resolveClosed);
+  clearTimeout(run.killTimer); clearTimeout(run.idleTimer);
   for (const rid of run.perms.keys()) broadcast({ type: 'permDone', sid: run.id, requestId: rid });
   runs.delete(run.id);
   if (!run.gotResult) {
@@ -600,11 +689,13 @@ function finish(run, code) {
   const r = rec(run.id); r.updatedAt = Date.now(); saveStore();
   broadcast({ type: 'status', sid: run.id, running: false });
   broadcast({ type: 'sessions' });
+  // messages that arrived while this process was on its way out
+  if (run.afterExit.length) (async () => { for (const m of run.afterExit) { try { await sendMessage(run.id, m.text, m.images); } catch (e) { log('afterExit send failed', e.message); } } })();
 }
 
 function stopRun(id) {
   const run = runs.get(id); if (!run) return false;
-  run.stopped = true; run.queue = [];
+  run.stopped = true; clearTimeout(run.idleTimer);
   for (const rid of run.perms.keys()) {
     writeCtl(run, { type: 'control_response', response: { subtype: 'success', request_id: rid, response: { behavior: 'deny', message: '使用者已停止', interrupt: true } } });
     broadcast({ type: 'permDone', sid: id, requestId: rid });
@@ -626,7 +717,7 @@ function answerPerm(id, requestId, a) {
     if (a.answers) input = { ...input, answers: a.answers };
     resp = { behavior: 'allow', updatedInput: input };
     if (a.always && Array.isArray(p.suggestions) && p.suggestions.length) resp.updatedPermissions = p.suggestions;
-    if (p.toolName === 'ExitPlanMode') { const r = rec(id); if (r.permissionMode === 'plan') { r.permissionMode = 'acceptEdits'; saveStore(); broadcast({ type: 'sessions' }); } }
+    if (p.toolName === 'ExitPlanMode') { const r = rec(id); if (r.permissionMode === 'plan') { r.permissionMode = 'auto'; saveStore(); broadcast({ type: 'sessions' }); } }
   } else {
     resp = { behavior: 'deny', message: a.message ? '使用者拒絕: ' + a.message : '使用者拒絕了這個操作' };
   }
@@ -642,7 +733,7 @@ async function getMessages(id) {
   let messages = [], ctx = null;
   if (run) { if (run.file) ({ messages, ctx } = await loadTranscript(run.file, run.startOffset)); messages = messages.concat(run.live); if (run.ctx) ctx = run.ctx; }
   else { const fp = await findFile(id); if (fp) ({ messages, ctx } = await loadTranscript(fp)); }
-  return { messages, ctx: withWindow(id, ctx), running: !!run, partial: run ? run.partial : '', activity: run ? run.activity : '', startedAt: run ? run.startedAt : null,
+  return { messages, ctx: withWindow(id, ctx), running: !!(run && run.turnActive), partial: run ? run.partial : '', activity: run ? run.activity : '', startedAt: run ? run.startedAt : null,
     perms: run ? [...run.perms.values()] : [], cwd: sessionCwd(id) };
 }
 
@@ -721,15 +812,29 @@ function openConsole(cwd, command) {
   // `start` gives the PowerShell window its own visible console. Only fixed strings + a UUID go on the command line.
   spawn('cmd.exe', [`/c start "Claude" powershell.exe -NoExit -Command "${command}"`], { cwd, windowsVerbatimArguments: true, windowsHide: true, detached: true, stdio: 'ignore', env: cleanEnv() }).unref();
 }
-let authInfo = null;
+let authInfo = null, authAt = 0, authPending = null;
 function refreshAuth() {
-  return new Promise(resolve => {
+  if (authPending) return authPending;
+  authPending = new Promise(resolve => {
     execFile(CLAUDE_BIN, ['auth', 'status'], { env: cleanEnv(), windowsHide: true, encoding: 'utf8', timeout: 20000 }, (err, out) => {
+      const prev = authInfo && authInfo.loggedIn;
       try { authInfo = JSON.parse(out); } catch { authInfo = { loggedIn: false, error: (err && err.message) || 'unknown' }; }
+      authAt = Date.now(); authPending = null;
+      if (prev !== authInfo.loggedIn) log('auth', authInfo.loggedIn ? 'logged in ' + (authInfo.email || '') : 'not logged in');
       broadcast({ type: 'auth', auth: authInfo }); resolve(authInfo);
     });
   });
+  return authPending;
 }
+// Logging in/out from any terminal (`claude auth login`, /login) rewrites ~/.claude/.credentials.json:
+// watch it so the account shown here follows without pressing ↻. A slow periodic check covers the rest
+// (e.g. credentials kept somewhere else).
+let authWatchTimer = null;
+function scheduleAuth(ms = 1500) { clearTimeout(authWatchTimer); authWatchTimer = setTimeout(refreshAuth, ms); }
+try {
+  fs.watch(CLAUDE_DIR, (ev, name) => { if (name && /^\.credentials\.json/i.test(String(name))) scheduleAuth(); });
+} catch (e) { log('cannot watch', CLAUDE_DIR, e.message); }
+setInterval(() => { if (clients.size) refreshAuth(); }, 5 * 60000);
 function normPath(p) {
   p = String(p || '').trim().replace(/^file:\/\/\/?/i, '');
   try { p = decodeURIComponent(p); } catch {}
@@ -776,12 +881,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
       res.write(': hello\n\n');
       clients.add(res);
-      const running = [...runs.values()].map(r => ({ sid: r.id, startedAt: r.startedAt, activity: r.activity, perms: [...r.perms.values()] }));
-      res.write('data: ' + JSON.stringify({ type: 'hello', running, rate: lastRate, auth: authInfo }) + '\n\n');
+      const running = [...runs.values()].filter(r => r.turnActive).map(r => ({ sid: r.id, startedAt: r.startedAt, activity: r.activity, perms: [...r.perms.values()] }));
+      res.write('data: ' + JSON.stringify({ type: 'hello', running, rate: lastRate, auth: authInfo, version: APP_VERSION }) + '\n\n');
       req.on('close', () => { clients.delete(res); lastClientSeen = Date.now(); });
+      if (Date.now() - authAt > 30000) refreshAuth(); // window opened/reloaded: make sure the account shown is current
       return;
     }
-    if (p === '/api/init' && M === 'GET') return json(res, 200, { prefs: store.prefs, auth: authInfo, rate: lastRate, home: os.homedir(), sessions: await listSessions() });
+    if (p === '/api/init' && M === 'GET') return json(res, 200, { version: APP_VERSION, prefs: store.prefs, auth: authInfo, rate: lastRate, home: os.homedir(), sessions: await listSessions() });
     if (p === '/api/sessions' && M === 'GET') return json(res, 200, { sessions: await listSessions() });
     if (p === '/api/sessions' && M === 'POST') {
       const b = await readBody(req);
@@ -799,6 +905,13 @@ const server = http.createServer(async (req, res) => {
       const cwd = (sid && UUID_RE.test(sid) && sessionCwd(sid.toLowerCase())) || path.resolve(normPath(u.searchParams.get('cwd') || os.homedir()));
       if (!fs.existsSync(cwd)) return json(res, 200, { commands: [] });
       return json(res, 200, { commands: await getCommands(cwd) });
+    }
+    if (p === '/api/shutdown' && M === 'POST') { // a newer start of the app wants to take over
+      if (runs.size) return json(res, 409, { busy: true, running: runs.size });
+      json(res, 200, { ok: true });
+      log('shutting down: replaced by a new start');
+      setTimeout(() => { flushStore(); process.exit(0); }, 100);
+      return;
     }
     if (p === '/api/usage/refresh' && M === 'POST') return json(res, 200, { rate: await refreshRate() });
     if (p === '/api/side' && M === 'POST') return json(res, 200, await runSide(await readBody(req)));
@@ -835,8 +948,8 @@ const server = http.createServer(async (req, res) => {
       if (act === 'messages' && M === 'GET') return json(res, 200, await getMessages(id));
       if (act === 'send' && M === 'POST') {
         const b = await readBody(req);
-        await sendMessage(id, String(b.text || ''), Array.isArray(b.images) ? b.images : []);
-        return json(res, 200, { ok: true });
+        const r = await sendMessage(id, String(b.text || ''), Array.isArray(b.images) ? b.images : []);
+        return json(res, 200, { ok: true, ...(r || {}) });
       }
       if (act === 'stop' && M === 'POST') return json(res, 200, { ok: stopRun(id) });
       if (act === 'perm' && M === 'POST') { const b = await readBody(req); return json(res, 200, { ok: answerPerm(id, b.requestId, b) }); }
@@ -880,20 +993,54 @@ setInterval(() => { for (const c of clients) { try { c.write(': ping\n\n'); } ca
 setInterval(() => {
   if (KEEP_ALIVE || clients.size || runs.size) return;
   if (Date.now() - lastClientSeen > IDLE_EXIT_MS) { log('idle, exiting'); flushStore(); process.exit(0); }
-}, 15000);
+}, 3000);
 process.on('exit', () => { if (saveTimer) flushStore(); for (const r of runs.values()) killTree(r.proc.pid); });
 process.on('SIGINT', () => process.exit(0));
 process.on('uncaughtException', e => log('uncaught', e.stack || String(e)));
 
-server.on('error', e => {
-  if (e.code === 'EADDRINUSE') { // already running: just open another window onto it
-    if (!NO_OPEN) openWindow();
-    setTimeout(() => process.exit(0), 300);
-  } else { log('server error', e.message); process.exit(1); }
+// ---------- starting while an older server is still running ----------
+// If it is idle, it is replaced right away (so a restart always runs the current code, with no waiting);
+// if a conversation is running there, it is left alone and we only open a window onto it.
+function portPid(port) {
+  return new Promise(resolve => execFile('netstat', ['-ano', '-p', 'TCP'], { windowsHide: true, encoding: 'utf8' }, (err, out) => {
+    const line = (out || '').split(/\r?\n/).find(l => new RegExp(`127\\.0\\.0\\.1:${port}\\s.*LISTENING`).test(l));
+    resolve(line ? Number(line.trim().split(/\s+/).pop()) : null);
+  }));
+}
+async function takeOver() {
+  const base = `http://127.0.0.1:${PORT}`, headers = { 'x-token': TOKEN, 'content-type': 'application/json' };
+  try {
+    const r = await fetch(base + '/api/shutdown', { method: 'POST', headers, body: '{}' });
+    if (r.ok) return true;              // it agreed to quit
+    if (r.status === 409) return false; // a conversation is running there
+    if (r.status !== 404) return false; // not ours / unexpected
+    // an older version without /api/shutdown: if nothing runs there, end its process
+    const s = await (await fetch(base + '/api/sessions', { headers })).json();
+    if (!Array.isArray(s.sessions) || s.sessions.some(x => x.running)) return false;
+    const pid = await portPid(PORT);
+    if (!pid || pid === process.pid) return false;
+    process.kill(pid);
+    return true;
+  } catch { return false; }
+}
+let tookOver = false, listenTries = 0;
+server.on('error', async e => {
+  if (e.code !== 'EADDRINUSE') { log('server error', e.message); process.exit(1); }
+  if (!tookOver) {
+    tookOver = true;
+    if (!(await takeOver())) { // busy (or not ours): just open another window onto it
+      if (!NO_OPEN) openWindow();
+      setTimeout(() => process.exit(0), 300);
+      return;
+    }
+    log('replaced the previous (idle) server');
+  }
+  if (++listenTries > 40) { if (!NO_OPEN) openWindow(); setTimeout(() => process.exit(1), 300); return; }
+  setTimeout(() => server.listen(PORT, '127.0.0.1'), 250); // wait for the old one to let go of the port
 });
 server.listen(PORT, '127.0.0.1', () => {
   try { fs.writeFileSync(LOG_FILE, ''); } catch {}
-  log(`CLI Controller listening on http://127.0.0.1:${PORT}/?t=${TOKEN}`);
+  log(`CLI Controller v${APP_VERSION} listening on http://127.0.0.1:${PORT}/?t=${TOKEN}`);
   lastClientSeen = Date.now();
   if (!NO_OPEN) openWindow();
   refreshAuth();

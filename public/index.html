@@ -16,37 +16,30 @@
     </div>
     <div class="sb-tools">
       <input id="search" type="search" placeholder="搜尋對話 / 資料夾…">
-      <button id="btnGroup" class="btn icon" title="切換：依資料夾 / 依時間">▤</button>
     </div>
     <div class="seg" id="srcSeg" title="要顯示哪裡開的對話">
       <button data-src="all">全部</button><button data-src="cli">CLI</button><button data-src="desktop">桌面版</button>
     </div>
     <div id="sessionList"></div>
     <div class="sb-foot">
-      <div class="opts">
-        <label><input type="checkbox" id="chkScratch"> 桌面版暫存</label>
-        <label><input type="checkbox" id="chkHidden"> 已封存</label>
-      </div>
-      <div class="acct">
-        <span id="account">…</span>
-        <span class="grow"></span>
-        <button id="btnAuth" class="btn icon small" title="重新檢查登入狀態">↻</button>
-        <button id="btnLogin" class="btn small" title="開一個 PowerShell 視窗執行 claude auth login">登入</button>
+      <!-- only shown when the claude CLI is not logged in -->
+      <div id="authAlert" class="authalert" hidden>
+        <span>claude CLI 尚未登入</span><span class="grow"></span>
+        <button id="btnLoginAlert" class="btn small primary" title="開一個 PowerShell 視窗執行 claude auth login">登入</button>
       </div>
       <div id="usage">
         <div class="uhead">
           <span class="utitle" title="claude CLI 登入帳號的方案用量，和在 claude 裡打 /usage 看到的一樣">用量</span>
           <span id="uUpdated" class="muted"></span>
           <span class="grow"></span>
-          <select id="uInterval" title="自動更新間隔（每次更新會送出一個極小的 Haiku 請求，約 650 tokens）">
-            <option value="0">自動：關</option>
-            <option value="1">每 1 分</option>
-            <option value="5">每 5 分</option>
-            <option value="15">每 15 分</option>
-          </select>
-          <button id="uRefresh" class="btn icon small" title="立即更新（送出一個極小的 Haiku 請求，約 650 tokens）">↻</button>
+          <button id="uRefresh" class="btn icon small" title="立即更新用量（送出一個極小的 Haiku 請求，約 650 tokens）。對話執行中會自動更新，不需要按">↻</button>
         </div>
         <div id="uRows"></div>
+      </div>
+      <div class="footrow">
+        <div id="verLine" class="muted small"></div>
+        <span class="grow"></span>
+        <button id="btnSettings" class="btn icon" title="設定（帳號、外觀、左側列表、對話…）">⚙</button>
       </div>
     </div>
   </aside>
@@ -58,11 +51,10 @@
         <div class="hsub"><span id="hCwd" class="chip" title="在檔案總管開啟"></span><span id="hModel" class="muted small"></span></div>
       </div>
       <div class="hright">
-        <button id="btnToolMode" class="btn small toolmode"></button>
         <button id="btnGallery" class="btn icon" title="圖片面板">🖼</button>
         <button id="btnTerminal" class="btn icon" title="在 PowerShell 開啟此 session (claude --resume)">⌨</button>
         <button id="btnPin" class="btn icon" title="釘選">📌</button>
-        <button id="btnHide" class="btn icon" title="封存（從列表收起，勾左下「已封存」可再看到）">🗄</button>
+        <button id="btnHide" class="btn icon" title="封存（從列表收起，⚙ 設定裡可以選擇顯示已封存）">🗄</button>
         <button id="btnDelete" class="btn icon" title="刪除這個對話（移到資源回收筒）">🗑</button>
       </div>
     </header>
@@ -86,6 +78,7 @@
           <button id="ppNew" class="btn small primary">＋ 新增</button>
         </div>
       </div>
+      <div id="queueBox" hidden></div>
       <div id="attachments"></div>
       <div class="inputwrap">
         <textarea id="input" rows="1" placeholder="輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片)"></textarea>
@@ -113,10 +106,7 @@
         </label>
         <label class="sel" title="權限模式 (--permission-mode)"><span>權限</span>
           <select id="selPerm">
-            <option value="manual">每次詢問</option>
-            <option value="acceptEdits">自動接受編輯</option>
             <option value="auto">Auto</option>
-            <option value="plan">規劃模式</option>
             <option value="bypassPermissions">略過所有權限</option>
           </select>
         </label>
@@ -156,6 +146,13 @@
       <button type="submit" class="btn primary">儲存 (Ctrl+Enter)</button>
     </div>
   </form>
+</div>
+<div id="settingsModal" class="modalbg" hidden>
+  <div class="modal settings">
+    <div class="mhead"><h3>⚙ 設定</h3><span class="grow"></span><button id="setClose" class="btn icon" title="關閉 (Esc)">✕</button></div>
+    <div id="setBody"></div>
+    <div class="muted small">設定會立即套用，不用儲存。</div>
+  </div>
 </div>
 <div id="menu" hidden></div>
 <div id="toast" hidden></div>

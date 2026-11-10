@@ -59,7 +59,7 @@ T.addEventListener('scroll', () => { S.stick = nearBottom(); });
 // ---------- sidebar ----------
 function visibleSessions() {
   const q = $('#search').value.trim().toLowerCase();
-  const showScratch = $('#chkScratch').checked, showHidden = $('#chkHidden').checked, src = S.source;
+  const showScratch = S.showScratch, showHidden = S.showHidden, src = S.source;
   return S.sessions.filter(s => (showHidden || !s.hidden || s.id === S.cur) && (showScratch || !s.scratch || s.id === S.cur) &&
     (src === 'all' || s.source === src || s.id === S.cur) &&
     (!q || (s.title + ' ' + s.cwd + ' ' + (s.lastPrompt || '')).toLowerCase().includes(q)));
@@ -69,7 +69,15 @@ function renderSidebar() {
   const ss = visibleSessions();
   const pinned = ss.filter(s => s.pinned), rest = ss.filter(s => !s.pinned);
   if (pinned.length) list.append(group('pinned', '📌 釘選', null, pinned));
-  if (S.prefs.groupBy === 'time') {
+  if (S.prefs.groupBy === 'flat') { // plain list, newest first, with the folder name under each title
+    if (rest.length) {
+      const box = el('div', { class: 'group flat' });
+      const max = S.flatAll ? Infinity : 60;
+      rest.slice(0, max).forEach(s => box.append(item(s, true)));
+      if (rest.length > max) box.append(el('div', { class: 'more muted', onclick: () => { S.flatAll = true; renderSidebar(); } }, `顯示其餘 ${rest.length - max} 個…`));
+      list.append(box);
+    }
+  } else if (S.prefs.groupBy === 'time') {
     const now = new Date(); const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     const b = [['今天', today], ['昨天', today - 864e5], ['過去 7 天', today - 7 * 864e5], ['過去 30 天', today - 30 * 864e5], ['更早', -Infinity]];
     for (let i = 0; i < b.length; i++) {
@@ -123,7 +131,7 @@ function sessionMenu(s, x, y) {
 // 封存 = app-side "hidden" flag: the conversation stays on disk, it just leaves the list
 // (sessions archived in Claude Desktop start out archived here too)
 function archiveSession(s) {
-  patch(s.id, { hidden: !s.hidden }).then(() => toast(s.hidden ? '已取消封存' : '已封存（勾左下「已封存」可以再看到）'));
+  patch(s.id, { hidden: !s.hidden }).then(() => toast(s.hidden ? '已取消封存' : '已封存（⚙ 設定 → 顯示已封存對話，可以再看到）'));
 }
 // 刪除 = the transcript (+ its folder) goes to the Windows Recycle Bin, so it can still be restored from there
 async function deleteSessionUI(s) {
@@ -167,7 +175,7 @@ function renderHead() {
   for (const id of ['#btnTerminal', '#btnPin', '#btnHide', '#btnDelete']) $(id).disabled = !s || !!S.draft;
   if (s) {
     $('#btnPin').classList.toggle('on', s.pinned); $('#btnHide').classList.toggle('on', s.hidden);
-    $('#btnHide').title = s.hidden ? '取消封存' : '封存（從列表收起，勾左下「已封存」可再看到）';
+    $('#btnHide').title = s.hidden ? '取消封存' : '封存（從列表收起，⚙ 設定裡可以選擇顯示已封存）';
   }
   document.title = (s && !S.draft ? s.title + ' — ' : '') + 'CLI Controller';
 }
@@ -207,12 +215,13 @@ $('#btnDelete').onclick = () => { const s = curSession(); if (s && !S.draft) del
 $('#btnGallery').onclick = () => toggleViewer();
 
 // ---------- composer controls ----------
+const PERM_MODES = ['auto', 'bypassPermissions'];
 function setSelectors(model, effort, perm) {
   const sm = $('#selModel');
   if (model && ![...sm.options].some(o => o.value === model)) sm.insertBefore(el('option', { value: model }, model), sm.lastElementChild);
   sm.value = model || '';
   $('#selEffort').value = effort || '';
-  $('#selPerm').value = perm || 'auto';
+  $('#selPerm').value = PERM_MODES.includes(perm) ? perm : 'auto'; // older modes (每次詢問 etc.) now run as Auto
 }
 function cfgFromSelectors() { return { model: $('#selModel').value, effort: $('#selEffort').value, permissionMode: $('#selPerm').value }; }
 async function onCfgChange(key, value) {
@@ -300,6 +309,11 @@ async function send(override) {
       await loadSessions();
     }
     const id = S.cur;
+    if (S.running.has(id)) { // Claude is busy: park it in the queue (like the Desktop app); 插話 sends it in now
+      enqueue(id, text, useInput ? S.attachments.slice() : []);
+      if (useInput) { input.value = ''; autosize(); S.attachments = []; renderAttachments(); }
+      return;
+    }
     if (useInput) { input.value = ''; autosize(); S.attachments = []; renderAttachments(); }
     S.stick = true;
     await api('POST', `/api/sessions/${id}/send`, { text, images });
@@ -311,8 +325,61 @@ $('#btnStop').onclick = () => S.cur && api('POST', `/api/sessions/${S.cur}/stop`
 function renderComposerState() {
   const run = S.cur && S.running.has(S.cur) && !S.draft;
   $('#btnStop').hidden = !run;
-  $('#btnSend').textContent = run ? '排入佇列 ➤' : '送出 ➤';
-  input.placeholder = run ? 'Claude 正在處理… 現在送出的訊息會在這一輪結束後接著執行' : '輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片)';
+  $('#btnSend').textContent = '送出 ➤';
+  $('#btnSend').title = run ? 'Claude 執行中：送出的訊息會先排隊，這一輪結束後自動送出（排隊中的訊息可以按「插話」馬上送進去）' : '送出 (Enter)';
+  input.placeholder = run ? 'Claude 正在處理… 現在送出會先排隊，這一輪結束後自動送出' : '輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片)';
+  renderQueue();
+}
+
+// ---------- message queue ----------
+// While Claude works, sent messages wait here (per session) and go out by themselves when the turn ends.
+// Each one can be sent in right away (插話 — claude picks it up after its current step), edited, or cancelled.
+S.queue = new Map(); // sid -> [{ id, text, atts: [{mediaType, data, url, name}] }]
+S.stoppedRuns = new Set(); // sessions whose last turn ended by ■ 停止 (their queue is kept, not auto-sent)
+const qOf = sid => S.queue.get(sid) || [];
+function enqueue(sid, text, atts) {
+  S.queue.set(sid, qOf(sid).concat({ id: crypto.randomUUID(), text, atts }));
+  renderQueue();
+}
+function dequeue(sid, qid) {
+  const list = qOf(sid), it = list.find(x => x.id === qid);
+  S.queue.set(sid, list.filter(x => x.id !== qid));
+  renderQueue();
+  return it;
+}
+function postQueued(sid, it) {
+  S.stick = true;
+  return api('POST', `/api/sessions/${sid}/send`, { text: it.text, images: it.atts.map(a => ({ mediaType: a.mediaType, data: a.data })) })
+    .catch(e => { toast('送出失敗: ' + e.message, 6000); S.queue.set(sid, [it].concat(qOf(sid))); renderQueue(); });
+}
+function injectQueued(sid, qid) { const it = dequeue(sid, qid); if (it) postQueued(sid, it); }
+function editQueued(sid, qid) {
+  const it = dequeue(sid, qid); if (!it) return;
+  input.value = it.text + (input.value.trim() ? '\n' + input.value : '');
+  S.attachments = it.atts.concat(S.attachments); renderAttachments();
+  autosize(); input.focus(); input.selectionStart = input.selectionEnd = it.text.length;
+}
+// turn finished: send everything that waited (the first starts a new run, the rest are taken into that same run)
+async function flushQueue(sid) {
+  const list = qOf(sid); if (!list.length) return;
+  S.queue.set(sid, []); renderQueue();
+  for (const it of list) await postQueued(sid, it);
+}
+function renderQueue() {
+  const box = $('#queueBox'), list = S.draft ? [] : qOf(S.cur);
+  box.innerHTML = ''; box.hidden = !list.length;
+  if (!list.length) return;
+  const running = S.running.has(S.cur);
+  box.append(el('div', { class: 'qhead muted small' }, `排隊中 ${list.length} 則 · ` + (running ? 'Claude 這一輪結束後會自動送出；滑鼠移上去可以插話、編輯或取消' : '目前沒有在執行，按「送出」或「插話」送出')));
+  for (const it of list) {
+    const sid = S.cur;
+    box.append(el('div', { class: 'qitem' },
+      el('div', { class: 'qtext', title: it.text }, it.text || '（只有圖片）', it.atts.length ? el('span', { class: 'muted small' }, `  🖼×${it.atts.length}`) : null),
+      el('div', { class: 'qbtns' },
+        el('button', { class: 'btn small primary', title: '馬上送給 Claude：它做完目前這一步就會看到，並在這一輪一起處理', onclick: () => injectQueued(sid, it.id) }, running ? '插話 ➤' : '送出 ➤'),
+        el('button', { class: 'btn small', title: '拿回輸入框修改（會從排隊中移除）', onclick: () => editQueued(sid, it.id) }, '編輯'),
+        el('button', { class: 'btn icon small', title: '取消這則訊息', onclick: () => dequeue(sid, it.id) }, '✕'))));
+  }
 }
 
 // ---------- new session (draft) ----------
@@ -533,21 +600,14 @@ function attachResult(b) {
     if (imgs.length) insert(el('div', { class: 'thumbs' }, imgs));
   }
 }
-function renderToolModeBtn() {
-  const b = $('#btnToolMode'); if (!b) return;
-  b.textContent = '工具：' + TOOL_MODES[S.toolMode];
-  b.title = '工具呼叫 (Bash、Read…) 的顯示方式，點一下切換\n摺疊：連續的工具呼叫合成一行\n隱藏：完全不顯示（圖片照樣顯示）\n全部：每個工具呼叫各一行';
-}
-$('#btnToolMode').onclick = () => {
-  const keys = Object.keys(TOOL_MODES);
-  S.toolMode = keys[(keys.indexOf(S.toolMode) + 1) % keys.length]; ls('cc_toolmode', S.toolMode);
-  renderToolModeBtn();
+// changed from ⚙ 設定 → 對話 → 工具呼叫
+function setToolMode(v) {
+  if (!TOOL_MODES[v] || S.toolMode === v) return;
+  S.toolMode = v; ls('cc_toolmode', v);
   const st = nearBottom(), top = T.scrollTop;
   renderTranscript();
   if (st) scrollBottom(true); else T.scrollTop = top;
-  toast('工具呼叫：' + TOOL_MODES[S.toolMode]);
-};
-renderToolModeBtn();
+}
 
 // live streaming text
 let streamTimer = null;
@@ -649,7 +709,8 @@ function handleEvent(ev) {
   if (S.loading && ev.sid && ev.sid === S.cur && ['msg', 'delta', 'result', 'perm', 'permDone', 'ctx'].includes(ev.type)) { S.pending.push(ev); return; }
   const isCur = ev.sid && ev.sid === S.cur && !S.draft;
   switch (ev.type) {
-    case 'hello':
+    case 'hello': // (re)connected — possibly to a newly started server
+      checkVersion(ev.version || null);
       for (const r of ev.running || []) {
         S.running.set(r.sid, { startedAt: r.startedAt, activity: r.activity });
         const pm = new Map(); for (const p of r.perms || []) pm.set(p.requestId, p); S.perms.set(r.sid, pm);
@@ -661,7 +722,12 @@ function handleEvent(ev) {
     case 'sessions': loadSessions().catch(() => {}); break;
     case 'status':
       if (ev.running) S.running.set(ev.sid, { startedAt: ev.startedAt, activity: '啟動中…' });
-      else { S.running.delete(ev.sid); S.perms.delete(ev.sid); if (isCur) { S.stream = ''; renderStream(); renderPerms(); } }
+      else {
+        S.running.delete(ev.sid); S.perms.delete(ev.sid); if (isCur) { S.stream = ''; renderStream(); renderPerms(); }
+        // turn over: send what queued up — unless the user pressed ■ 停止, then keep it for them to decide
+        if (S.stoppedRuns.delete(ev.sid)) { if (qOf(ev.sid).length) toast('已停止；排隊中的訊息保留著，可以按「送出」或編輯'); }
+        else flushQueue(ev.sid);
+      }
       renderSidebar(); if (isCur) { renderComposerState(); renderWorking(); }
       break;
     case 'activity': { const r = S.running.get(ev.sid); if (r) r.activity = ev.text; if (isCur) renderWorking(); break; }
@@ -674,8 +740,13 @@ function handleEvent(ev) {
         if (ev.msg.role === 'assistant') { S.stream = ''; renderStream(); }
         T.querySelector('.empty') && T.querySelector('.empty').remove();
         appendMsg(ev.msg); renderStrip();
-        if (ev.queued) insert(el('div', { class: 'sysline muted' }, '（已排入佇列，這一輪結束後送出）'));
+        if (ev.injected) insert(el('div', { class: 'sysline muted injnote', 'data-uuid': ev.msg.uuid }, '↳ 插話：Claude 會在目前這一步完成後看到'));
+        else if (ev.queued) insert(el('div', { class: 'sysline muted injnote' }, '↳ 已排入佇列，這一輪結束後送出（伺服器是舊版，重開 App 後才能直接插話）'));
         if (st) scrollBottom(true); }
+      break;
+    case 'consumed': // claude took in a message that was sent while it was working
+      if (!isCur) break;
+      { const n = T.querySelector(`.injnote[data-uuid="${ev.uuid}"]`); if (n) { n.textContent = '✓ Claude 已收到這則插話'; n.classList.add('ok'); } }
       break;
     case 'delta':
       if (!isCur) break;
@@ -692,6 +763,7 @@ function handleEvent(ev) {
     }
     case 'permDone': { const pm = S.perms.get(ev.sid); if (pm) pm.delete(ev.requestId); renderSidebar(); if (isCur) renderPerms(); break; }
     case 'result':
+      if ((ev.result || {}).stopped) S.stoppedRuns.add(ev.sid);
       if (isCur) {
         const r = ev.result || {}; S.stream = ''; renderStream();
         let node;
@@ -709,6 +781,10 @@ function handleEvent(ev) {
     case 'rate': renderRate(ev.rate); break;
     case 'auth': renderAuth(ev.auth); break;
     case 'prompts': loadPrompts(); break;
+    case 'notice': // e.g. a message that will go out once the previous claude process has exited
+      toast(ev.text, 6000);
+      if (isCur) insert(el('div', { class: 'sysline muted' }, ev.text));
+      break;
   }
 }
 function notify(title, body) {
@@ -718,7 +794,7 @@ function notify(title, body) {
 // Plan usage of the account the claude CLI is logged into (same numbers as `/usage` in an interactive claude).
 // Updated whenever a message runs here, by the ↻ button, and automatically on the chosen interval
 // (each refresh is one tiny Haiku request; it is skipped when a message already refreshed the numbers).
-const RATE_NAMES = { five_hour: '目前工作階段（5 小時）', seven_day: '本週（全部模型）', seven_day_opus: '本週 Opus', seven_day_sonnet: '本週 Sonnet' };
+const RATE_NAMES = { five_hour: '目前工作階段', seven_day: '本週', seven_day_opus: '本週 Opus', seven_day_sonnet: '本週 Sonnet' };
 function fmtWhen(ms) {
   const d = new Date(ms), now = new Date();
   const hm = d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0');
@@ -738,45 +814,46 @@ function renderRate(r) {
     const expired = v.resetsAt && v.resetsAt <= now;
     const pct = expired ? 0 : Math.round(v.utilization * 100);
     const level = pct >= 90 ? ' hot' : pct >= 75 ? ' warm' : '';
-    const reset = v.resetsAt ? (expired ? '已重置' : fmtWhen(v.resetsAt * 1000) + ' 重置') : '';
-    rows.append(el('div', { class: 'urow', title: `${RATE_NAMES[k] || k}：已用 ${pct}%${reset ? '，' + reset : ''}` },
-      el('div', { class: 'ulabel' }, el('span', { class: 'uname' }, RATE_NAMES[k] || k), el('span', { class: 'ureset muted' }, reset),
-        el('span', { class: 'upct' + level }, pct + '%')),
+    // one line: 目前工作階段（4小時11分後重置） 13:50 …… 50%
+    const left = v.resetsAt ? (expired ? '（已重置）' : `（${fmtLeft(v.resetsAt - now).replace(/ /g, '')}後重置）`) : '';
+    const at = v.resetsAt && !expired ? fmtWhen(v.resetsAt * 1000) : '';
+    rows.append(el('div', { class: 'urow', title: `${RATE_NAMES[k] || k}：已用 ${pct}%${at ? `\n${at} 重置，還有 ${fmtLeft(v.resetsAt - now)}` : ''}` },
+      el('div', { class: 'ulabel' }, el('span', { class: 'uname' }, (RATE_NAMES[k] || k) + left),
+        el('span', { class: 'ureset muted' }, at), el('span', { class: 'upct' + level }, pct + '%')),
       el('div', { class: 'ubar' }, el('i', { class: level.trim(), style: `width:${Math.min(100, pct)}%` }))));
   }
 }
-setInterval(() => renderRate(), 60000); // re-check reset times / "updated at" date
+// time left until a reset, e.g. "2 天 5 小時", "3 小時 12 分", "8 分"
+function fmtLeft(sec) {
+  const m = Math.max(1, Math.ceil(sec / 60)), d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+  if (d) return `${d} 天 ${h} 小時`;
+  if (h) return `${h} 小時 ${mm} 分`;
+  return `${mm} 分`;
+}
+setInterval(() => renderRate(), 30000); // keep the countdown / "updated at" current
 
-S.usageEvery = Number(ls('cc_usage_every') ?? 5); if (![0, 1, 5, 15].includes(S.usageEvery)) S.usageEvery = 5;
-$('#uInterval').value = String(S.usageEvery);
-$('#uInterval').onchange = () => { S.usageEvery = Number($('#uInterval').value); ls('cc_usage_every', String(S.usageEvery)); autoUsage(); };
+// Usage numbers arrive for free with every reply while a conversation runs here. The only other way to refresh
+// them is the ↻ button, which sends one tiny Haiku request (claude learns the numbers only from an API response).
 let usageBusy = false;
-async function refreshUsage(manual) {
+async function refreshUsage() {
   if (usageBusy) return; usageBusy = true;
   $('#uRefresh').classList.add('spin'); $('#uRefresh').disabled = true;
   try { const d = await api('POST', '/api/usage/refresh'); renderRate(d.rate); }
-  catch (e) { if (manual) toast('無法更新用量: ' + e.message, 6000); }
+  catch (e) { toast('無法更新用量: ' + e.message, 6000); }
   finally { usageBusy = false; $('#uRefresh').classList.remove('spin'); $('#uRefresh').disabled = false; }
 }
-$('#uRefresh').onclick = () => refreshUsage(true);
-// auto refresh: only while the window is visible, and only when the numbers are older than the interval
-function autoUsage() {
-  if (!S.usageEvery || document.visibilityState !== 'visible') return;
-  const age = S.rate && S.rate.receivedAt ? Date.now() - S.rate.receivedAt : Infinity;
-  if (age >= S.usageEvery * 60000 - 2000) refreshUsage(false);
-}
-setInterval(autoUsage, 20000);
-document.addEventListener('visibilitychange', autoUsage);
+$('#uRefresh').onclick = () => refreshUsage();
+try { localStorage.removeItem('cc_usage_every'); } catch {} // the old auto-refresh setting is gone
+// The account lives in ⚙ 設定 → 帳號與用量; the sidebar only shows an alert when the CLI is not logged in.
 function renderAuth(a) {
   if (!a) return;
   S.auth = a; renderRate();
-  $('#account').title = a.loggedIn ? ['claude CLI 登入帳號', a.email, a.orgName && '組織：' + a.orgName, a.planTier || a.subscriptionType].filter(Boolean).join('\n') : '';
-  $('#account').textContent = a.loggedIn ? `${a.email || '已登入'}${a.subscriptionType ? ' · ' + a.subscriptionType : ''}` : '未登入';
-  $('#account').classList.toggle('err', !a.loggedIn);
-  $('#btnLogin').classList.toggle('primary', !a.loggedIn);
+  $('#authAlert').hidden = !!a.loggedIn;
+  if (!$('#settingsModal').hidden) renderSettings();
 }
-$('#btnLogin').onclick = () => api('POST', '/api/login').then(() => toast('已開啟登入視窗，完成後按 ↻ 重新檢查', 6000)).catch(e => toast(e.message));
-$('#btnAuth').onclick = () => api('GET', '/api/auth').then(d => { renderAuth(d.auth); toast(d.auth.loggedIn ? '已登入' : '未登入'); });
+function doLogin() { api('POST', '/api/login').then(() => toast('已開啟登入視窗，登入完成後這裡會自動更新', 6000)).catch(e => toast(e.message)); }
+function recheckAuth() { return api('GET', '/api/auth').then(d => { renderAuth(d.auth); toast(d.auth.loggedIn ? '已登入' : '未登入'); }); }
+$('#btnLoginAlert').onclick = doLogin;
 
 // ---------- image viewer (right split) ----------
 let vCur = null;
@@ -1115,11 +1192,88 @@ S.source = ['all', 'cli', 'desktop'].includes(ls('cc_source')) ? ls('cc_source')
 function renderSeg() { document.querySelectorAll('#srcSeg button').forEach(b => b.classList.toggle('on', b.dataset.src === S.source)); }
 document.querySelectorAll('#srcSeg button').forEach(b => b.onclick = () => { S.source = b.dataset.src; ls('cc_source', S.source); renderSeg(); renderSidebar(); });
 renderSeg();
-$('#chkScratch').checked = ls('cc_scratch') === '1';
-$('#chkHidden').checked = ls('cc_hidden') === '1';
-$('#chkScratch').onchange = () => { ls('cc_scratch', $('#chkScratch').checked ? '1' : '0'); renderSidebar(); };
-$('#chkHidden').onchange = () => { ls('cc_hidden', $('#chkHidden').checked ? '1' : '0'); renderSidebar(); };
-$('#btnGroup').onclick = () => { S.prefs.groupBy = S.prefs.groupBy === 'time' ? 'folder' : 'time'; api('POST', '/api/prefs', { groupBy: S.prefs.groupBy }); renderSidebar(); toast(S.prefs.groupBy === 'time' ? '依時間分組' : '依資料夾分組'); };
+// ⚙ 設定 → 左側列表: show Desktop temp sessions / archived sessions
+S.showScratch = ls('cc_scratch') === '1';
+S.showHidden = ls('cc_hidden') === '1';
+const GROUP_MODES = { folder: '依資料夾', time: '依時間分段', flat: '時間排序' };
+function setGroupBy(v) {
+  if (!GROUP_MODES[v]) v = 'folder';
+  S.prefs.groupBy = v; api('POST', '/api/prefs', { groupBy: v }).catch(() => {});
+  renderSidebar();
+}
+
+// ---------- version ----------
+// page = public/version.json on disk now (what this page and a fresh server would run);
+// server = the version the running server started with. Different → the server is old and needs a restart.
+S.ver = { page: null, server: null };
+async function checkVersion(serverVer) {
+  if (serverVer !== undefined) S.ver.server = serverVer || null;
+  try { S.ver.page = (await (await fetch('/version.json', { cache: 'no-store' })).json()).version; } catch {}
+  renderVersion();
+}
+function renderVersion() {
+  const v = $('#verLine'), { page, server } = S.ver;
+  if (!page) { v.textContent = ''; return; }
+  const old = server !== page;
+  v.className = old ? 'verwarn' : 'muted small';
+  v.textContent = old ? '⚠ 伺服器未重開到新版' : `v${page}`;
+  v.title = old
+    ? `伺服器：${server ? 'v' + server : '舊版（沒有版號）'} → 程式：v${page}\n等沒有對話在執行時，關掉 App 再用 start.vbs 開啟就會換成新版。`
+    : `CLI Controller v${page}（畫面和伺服器都是這個版本）`;
+}
+
+// ---------- settings (⚙) ----------
+// Theme is per window (localStorage); the rest are the same values the other controls use.
+const THEMES = { system: '跟隨系統', light: '淺色', dark: '深色' };
+function applyTheme(t) {
+  if (!THEMES[t]) t = 'system';
+  if (t === 'system') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t);
+}
+applyTheme(ls('cc_theme'));
+function segRow(label, hint, options, value, onPick) {
+  return el('div', { class: 'setrow' },
+    el('div', { class: 'setlabel' }, label, hint ? el('div', { class: 'muted small' }, hint) : null),
+    el('div', { class: 'seg setseg' }, Object.entries(options).map(([v, text]) =>
+      el('button', { type: 'button', class: v === String(value) ? 'on' : '', onclick: () => { onPick(v); renderSettings(); } }, text))));
+}
+const setSection = title => el('div', { class: 'setsec' }, title);
+// Everything configurable lives here, grouped; nothing in here is duplicated elsewhere in the UI.
+function renderSettings() {
+  const body = $('#setBody'); body.innerHTML = '';
+  const a = S.auth || {};
+  const acct = a.loggedIn
+    ? [a.email || '已登入', [a.orgName, a.planTier || a.subscriptionType].filter(Boolean).join(' · ')].filter(Boolean)
+    : ['尚未登入'];
+  body.append(
+    setSection('帳號'),
+    el('div', { class: 'setrow' },
+      el('div', { class: 'setlabel' }, 'claude CLI 登入帳號', el('div', { class: 'muted small' }, '登入或登出後這裡會自動更新')),
+      el('div', { class: 'setacct' + (a.loggedIn ? '' : ' err') }, acct.map(t => el('div', null, t))),
+      el('button', { class: 'btn icon small', title: '重新檢查登入狀態', onclick: () => recheckAuth() }, '↻'),
+      el('button', { class: 'btn small' + (a.loggedIn ? '' : ' primary'), title: '開一個 PowerShell 視窗執行 claude auth login', onclick: doLogin }, a.loggedIn ? '換帳號' : '登入')),
+    setSection('外觀'),
+    segRow('主題', null, THEMES, ls('cc_theme') || 'system', v => { ls('cc_theme', v); applyTheme(v); }),
+    setSection('左側列表'),
+    segRow('排列方式', null, GROUP_MODES, S.prefs.groupBy || 'folder', v => setGroupBy(v)),
+    segRow('顯示桌面版暫存對話', 'Claude Desktop 放在 AppData 的暫存 session', { 0: '不顯示', 1: '顯示' }, S.showScratch ? 1 : 0,
+      v => { S.showScratch = v === '1'; ls('cc_scratch', S.showScratch ? '1' : '0'); renderSidebar(); }),
+    segRow('顯示已封存對話', '封存的對話會以淡色顯示，右鍵可以取消封存', { 0: '不顯示', 1: '顯示' }, S.showHidden ? 1 : 0,
+      v => { S.showHidden = v === '1'; ls('cc_hidden', S.showHidden ? '1' : '0'); renderSidebar(); }),
+    setSection('對話'),
+    segRow('工具呼叫', 'Bash、Read 等工具呼叫的顯示方式', TOOL_MODES, S.toolMode, v => setToolMode(v)),
+    segRow('新對話預設權限', 'Auto：一般操作自動執行，危險操作會擋下。略過所有權限：完全不確認', { auto: 'Auto', bypassPermissions: '略過所有權限' }, PERM_MODES.includes(S.prefs.permissionMode) ? S.prefs.permissionMode : 'auto',
+      v => { api('POST', '/api/prefs', { permissionMode: v }).then(d => { S.prefs = d.prefs; if (S.draft) $('#selPerm').value = v; }); S.prefs.permissionMode = v; }),
+    setSection('關於'),
+    el('div', { class: 'setrow' }, el('div', { class: 'setlabel' }, '版本'),
+      el('div', { class: S.ver.server && S.ver.server === S.ver.page ? 'muted' : 'err' },
+        S.ver.page ? `v${S.ver.page}` + (S.ver.server === S.ver.page ? '' : `（伺服器：${S.ver.server ? 'v' + S.ver.server : '舊版'}，需要重開 App）`) : '—')),
+  );
+}
+function openSettings() { renderSettings(); $('#settingsModal').hidden = false; }
+$('#btnSettings').onclick = openSettings;
+$('#setClose').onclick = () => { $('#settingsModal').hidden = true; };
+$('#settingsModal').addEventListener('mousedown', e => { if (e.target.id === 'settingsModal') $('#settingsModal').hidden = true; });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#settingsModal').hidden) $('#settingsModal').hidden = true; });
 document.addEventListener('keydown', e => {
   if (e.ctrlKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); newDraft(); }
 });
@@ -1130,6 +1284,8 @@ setInterval(() => { if (document.visibilityState === 'visible') renderSidebar();
   try {
     const d = await api('GET', '/api/init');
     S.prefs = d.prefs; S.sessions = d.sessions;
+    checkVersion(d.version || null);
+    if (!GROUP_MODES[S.prefs.groupBy]) S.prefs.groupBy = 'folder';
     renderAuth(d.auth); renderRate(d.rate);
   } catch (e) { toast('無法連線到伺服器: ' + e.message, 10000); }
   connect();
