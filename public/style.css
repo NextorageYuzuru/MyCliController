@@ -64,7 +64,12 @@ body.dragging { cursor: col-resize; user-select: none; }
 .gauge .gpct { font-size: 11px; font-weight: 600; margin-top: -2px; }
 .gauge .glab { font-size: 9px; color: var(--muted); margin-top: 2px; }
 /* 頂端分頁列（只在左側收起時出現） */
-#tabBar { display: flex; align-items: flex-end; gap: 2px; padding: 5px 8px 0; background: var(--panel); border-bottom: 1px solid var(--border); overflow-x: auto; overflow-y: hidden; flex-shrink: 0; scrollbar-width: thin; }
+/* 上方條永遠兩區：左＝固定不捲動的「主／副」捷徑卡；右＝Web 分頁式的整區（可捲動、收合、左右拖曳） */
+#tabBar { display: flex; align-items: flex-start; padding: 5px 8px 0; background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0; min-width: 0; }
+#tabShort { display: flex; align-items: flex-start; gap: 2px; flex-shrink: 0; max-width: 42%; overflow: hidden; padding-right: 8px; margin-right: 8px; border-right: 1px solid var(--border); min-height: 29px; }
+#tabShort .tab { max-width: 170px; min-width: 80px; }
+.tshint { align-self: center; font-size: 11px; color: var(--muted); opacity: .75; white-space: nowrap; padding: 0 6px; cursor: default; }
+#tabScroll { flex: 1; min-width: 0; display: flex; align-items: flex-end; gap: 2px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
 #tabBar[hidden] { display: none; }
 .tab { display: flex; align-items: center; gap: 6px; max-width: 200px; min-width: 90px; padding: 5px 10px; border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; cursor: pointer; font-size: 12.5px; color: var(--muted); flex-shrink: 0; }
 .tab:hover { background: var(--panel2); }
@@ -425,3 +430,21 @@ img.thumb { max-width: 260px; max-height: 180px; border-radius: 6px; border: 1px
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+
+/* 寬頁模式分頁列：群組／資料夾結構、捷徑虛擬卡片 */
+.tunit, .tfold { display: flex; align-items: flex-end; gap: 2px; flex-shrink: 0; }
+.tunit.tg { border-bottom: 3px solid var(--fg); padding: 0 4px; margin-right: 8px; border-radius: 6px 6px 0 0; background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.tfold { margin-right: 4px; }
+.tchip { display: flex; align-items: center; gap: 4px; padding: 2px 8px; margin-bottom: 4px; border-radius: 6px; font-size: 12px; cursor: pointer; flex-shrink: 0; user-select: none; white-space: nowrap; }
+.tchip .ttl { overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+.tchip .tcount { font-weight: 400; opacity: .7; font-size: 11px; }
+.tgchip { font-weight: 600; }
+.tfchip { color: var(--muted); background: var(--panel2); }
+.tfchip:hover { color: var(--text); }
+.tmore { align-self: center; padding: 1px 7px; border-radius: 6px; background: var(--panel2); color: var(--muted); font-size: 11px; cursor: pointer; flex-shrink: 0; margin-bottom: 3px; }
+.tdiv { width: 1px; align-self: stretch; background: var(--border); margin: 4px 6px 0; flex-shrink: 0; }
+.vcard { background: color-mix(in srgb, var(--accent) 16%, var(--panel)); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); color: var(--text); }
+.vcard:hover { background: color-mix(in srgb, var(--accent) 24%, var(--panel)); }
+.vtag { font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; background: var(--accent); color: #fff; flex-shrink: 0; }
+#tabBar .dz-before { box-shadow: inset 3px 0 0 var(--accent); }
+#tabBar .dz-after { box-shadow: inset -3px 0 0 var(--accent); }

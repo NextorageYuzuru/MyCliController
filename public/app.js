@@ -176,7 +176,7 @@ function dndWire(node, info) {
     clearDropMarks();
     if (!plan) return;
     e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move';
-    node.classList.add('dz-' + plan.pos);
+    (node.__block && plan.pos !== 'into' ? node.__block : node).classList.add('dz-' + plan.pos); // 分頁列：前／後的記號畫在整個區塊（群組／資料夾連同底下的分頁）的邊上
   });
   node.addEventListener('drop', e => {
     if (!S.dnd) return;
@@ -188,7 +188,8 @@ function dndWire(node, info) {
 }
 // where on the target the pointer is: before / after (halves), or 'into' for the middle of a group header
 function dropPos(e, node, allowInto) {
-  const r = node.getBoundingClientRect(), y = (e.clientY - r.top) / Math.max(1, r.height);
+  const r = node.getBoundingClientRect(), horiz = !!node.closest('#tabBar'); // 分頁列是橫的：用左右判斷
+  const y = horiz ? (e.clientX - r.left) / Math.max(1, r.width) : (e.clientY - r.top) / Math.max(1, r.height);
   if (allowInto) return y < 0.28 ? 'before' : y > 0.72 ? 'after' : 'into';
   return y < 0.5 ? 'before' : 'after';
 }
@@ -355,10 +356,7 @@ function renameInput(s) {
   return i;
 }
 // click in the list: if the other pane already shows it, go there; otherwise open it in the active pane
-function openHere(id) {
-  const other = panesOn().find(p => p !== ACTIVE && paneShows(p, id));
-  if (other) setActive(other); else openSession(id, ACTIVE);
-}
+function openHere(id) { openMain(id); } // 左鍵點對話＝在主視窗預覽（已在某格顯示就跳過去）；要真的說話才會變成最新主視窗
 function sessionMenu(s, x, y) {
   const inR = paneShows(PANE.R, s.id) && !PANE.R.el.hidden;
   showMenu(x, y, [
@@ -557,7 +555,7 @@ async function send(override) {
       await loadSessions();
     }
     const id = pst(p).cur;
-    promoteTab(id);
+    commitShortcut(p, id); // 真的說話了：這格的「最新主／副視窗」捷徑換成這個對話
     if (S.running.has(id)) { // Claude is busy: park it in the queue (like the Desktop app); 插話 sends it in now
       enqueue(id, text, atts);
       if (useInput) clearComposerOf(p);
@@ -1624,48 +1622,133 @@ function applySidebar(collapsed, init) {
 }
 // ---- 微縮 UI：用量小儀表 + 頂端分頁列 ----
 S.tabsOn = ls('cc_tabs') === '1';
-try { S.tabOrder = JSON.parse(ls('cc_taborder') || '[]'); } catch { S.tabOrder = []; }
-if (!Array.isArray(S.tabOrder)) S.tabOrder = [];
-function saveTabOrder() { ls('cc_taborder', JSON.stringify(S.tabOrder.slice(0, 200))); }
-// 真的在這個對話繼續作業（送出訊息）→ 移到分頁列最左邊
-function promoteTab(id) {
-  if (!id || S.tabOrder[0] === id) return;
-  S.tabOrder = [id, ...S.tabOrder.filter(x => x !== id)]; saveTabOrder(); renderTabs();
+// ---- 寬頁模式的頂端分頁列 ----
+// 結構＝左側列表（群組 > 資料夾 > 對話：收合狀態、排序都共用），最前面是兩張「捷徑」虛擬卡片：
+//  · 主：最近一次「真的在主視窗說話」的對話　· 副：最近一次「真的在副視窗說話」的對話
+// 左鍵點任何對話只是在主視窗「預覽」，不會變捷徑；要真的送出訊息才算（commitShortcut），直到被下一個取代。
+let SHORT = { main: null, sub: null };
+try { SHORT = Object.assign(SHORT, JSON.parse(ls('cc_sc') || '{}')); } catch {}
+function saveShort() { ls('cc_sc', JSON.stringify(SHORT)); }
+function commitShortcut(p, id) {
+  const k = p.key === 'R' ? 'sub' : 'main';
+  if (!id || SHORT[k] === id) return;
+  SHORT[k] = id; saveShort(); renderTabs();
+}
+// 預覽：已經在某一格顯示就跳過去，否則一律開在主視窗（左）
+function openMain(id) {
+  const shown = panesOn().find(p => paneShows(p, id));
+  if (shown) { setActive(shown); return; }
+  if (ACTIVE !== PANE.L) setActive(PANE.L);
+  openSession(id, PANE.L);
+}
+function openSub(id) {
+  const shown = panesOn().find(p => paneShows(p, id));
+  if (shown) { setActive(shown); return; }
+  openRight(id);
+}
+// 左側列表同款的結構資料（群組／資料夾的順序、群組成員、資料夾內對話的手動排序）
+function tabStructure() {
+  const vis = S.sessions.filter(s => (S.showHidden || !s.hidden) && (S.showScratch || !s.scratch) && (S.source === 'all' || s.source === S.source));
+  const pinned = vis.filter(s => s.pinned), rest = vis.filter(s => !s.pinned);
+  const groups = new Map();
+  for (const s of rest) { const k = folderKey(s.cwd); if (!groups.has(k)) groups.set(k, { cwd: s.cwd, items: [] }); groups.get(k).items.push(s); }
+  for (const [k, g] of groups) g.items = orderSessions(k, g.items);
+  const units = [], placed = new Set();
+  for (const fg of folderGroups()) {
+    const inner = fg.folders.filter(k => groups.has(k)); inner.forEach(k => placed.add(k));
+    units.push({ key: 'g:' + fg.id, fg, folders: inner.map(k => [k, groups.get(k)]) });
+  }
+  for (const [k, g] of groups) if (!placed.has(k)) units.push({ key: 'f:' + k, folder: [k, g] });
+  const ord = Array.isArray(S.prefs.folderOrder) ? S.prefs.folderOrder : [];
+  units.forEach((u, i) => { const o = ord.indexOf(u.key); u.rank = o >= 0 ? o : 1e6 + i; });
+  units.sort((a, b) => a.rank - b.rank);
+  S.topKeys = units.map(u => u.key);
+  return { pinned, units };
 }
 function renderTabs() {
   const bar = $('#tabBar'); if (!bar) return;
   bar.hidden = !(S.sbCollapsed && S.tabsOn);
   $('#btnTabs').classList.toggle('on', S.tabsOn);
   if (bar.hidden) return;
-  // 順序是固定的：只看（點分頁、切換瀏覽）不會重排；真的送出訊息繼續作業時才把它移到最左（promoteTab）。
-  // 目前焦點／另一個分割格的分頁只用外觀標示。還沒存的新對話（草稿）暫時放最前面。
-  const vis = S.sessions.filter(s => (S.showHidden || !s.hidden) && (S.showScratch || !s.scratch));
-  const byId = new Map(vis.map(s => [s.id, s]));
-  S.tabOrder = S.tabOrder.filter(id => byId.has(id));
-  const have = new Set(S.tabOrder);
-  const fresh = vis.filter(s => !have.has(s.id)).sort((a, b) => b.updatedAt - a.updatedAt).map(s => s.id);
-  if (!S.tabOrder.length) { const cur = pst(ACTIVE).cur; if (cur && fresh.includes(cur)) fresh.splice(fresh.indexOf(cur), 1), fresh.unshift(cur); }
-  S.tabOrder = S.tabOrder.concat(fresh); saveTabOrder();
+  if (S.dnd) { S.dndPending = true; return; } // 拖曳中不重畫，放開後再畫
+  const st = tabStructure();
+  const byId = new Map(S.sessions.map(s => [s.id, s]));
   const paneOf = new Map(panesOn().filter(p => !pst(p).draft && pst(p).cur).map(p => [pst(p).cur, p]));
-  const tabs = panesOn().filter(p => pst(p).draft || !pst(p).cur).map(p => ({ pane: p, draft: true }));
-  for (const id of S.tabOrder) tabs.push({ pane: paneOf.get(id), s: byId.get(id) });
-  bar.innerHTML = '';
-  for (const t of tabs) {
-    const s = t.s, run = s && S.running.has(s.id), wait = s && S.perms.get(s.id) && S.perms.get(s.id).size;
-    const d = el('div', { class: 'tab' + (t.pane === ACTIVE ? ' cur' : t.pane ? ' side' : ''), title: s ? s.title + '\n' + s.cwd : '新對話' },
-      el('span', { class: 'ttl' }, s ? s.title : '＋ 新對話'),
-      s ? el('span', { class: 'sflag' + (wait ? ' wait' : run ? ' run' : UNREAD.has(s.id) ? ' unread' : '') }) : null);
-    if (s) {
-      d.onclick = () => openHere(s.id);
-      d.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
-        ['⫽ 加入到分割畫面', () => (paneShows(PANE.R, s.id) && !PANE.R.el.hidden ? setActive(PANE.R) : openRight(s.id))],
-        ['✎ 重新命名', () => renameSession(s)],
-      ]); };
-    } else d.onclick = () => setActive(t.pane);
-    bar.append(d);
+  const flagOf = s => 'sflag' + (S.perms.get(s.id) && S.perms.get(s.id).size ? ' wait' : S.running.has(s.id) ? ' run' : UNREAD.has(s.id) ? ' unread' : '');
+  const toggle = key => () => { S.collapsed.has(key) ? S.collapsed.delete(key) : S.collapsed.add(key); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
+  const sessionTab = (s, fk) => {
+    const p = paneOf.get(s.id);
+    const d = el('div', { class: 'tab' + (p === ACTIVE ? ' cur' : p ? ' side' : ''), title: s.title + '\n' + s.cwd },
+      el('span', { class: 'ttl' }, s.title), el('span', { class: flagOf(s) }));
+    d.onclick = () => openMain(s.id);
+    d.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
+      ['⫽ 加入到分割畫面', () => (paneShows(PANE.R, s.id) && !PANE.R.el.hidden ? setActive(PANE.R) : openRight(s.id))],
+      ['✎ 重新命名', () => renameSession(s)],
+    ]); };
+    if (fk) dndWire(d, { type: 'session', sid: s.id, fk });
+    return d;
+  };
+  const moreChip = (key, n) => { const m = el('div', { class: 'tmore', title: '展開其餘' }, '+' + n); m.onclick = () => { (S.expandedGroups ||= new Set()).add(key); renderSidebar(); }; return m; };
+  const folderUnit = ([k, g], gid) => {
+    const key = 'f:' + k, collapsed = S.collapsed.has(key);
+    const wrap = el('div', { class: 'tfold' + (collapsed ? ' collapsed' : '') });
+    const chip = el('div', { class: 'tchip tfchip', title: g.cwd + '\n右鍵：資料夾群組選單' },
+      el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, baseName(g.cwd) || '(未知)'), el('span', { class: 'tcount' }, g.items.length));
+    chip.onclick = toggle(key);
+    chip.oncontextmenu = e => { e.preventDefault(); folderMenu(g.cwd, e.clientX, e.clientY); };
+    dndWire(chip, { type: 'folder', key: k, gid: gid || null }); chip.__block = wrap;
+    wrap.append(chip);
+    if (!collapsed) {
+      const max = S.expandedGroups && S.expandedGroups.has(key) ? Infinity : 15;
+      g.items.slice(0, max).forEach(s => wrap.append(sessionTab(s, k)));
+      if (g.items.length > max) wrap.append(moreChip(key, g.items.length - max));
+    }
+    return wrap;
+  };
+  const groupUnit = u => {
+    const fg = u.fg, key = 'g:' + fg.id, collapsed = S.collapsed.has(key), color = fg.color || '#8a8a8a';
+    const total = u.folders.reduce((n, [, f]) => n + f.items.length, 0);
+    const wrap = el('div', { class: 'tunit tg' + (collapsed ? ' collapsed' : ''), style: '--fg:' + color });
+    const chip = el('div', { class: 'tchip tgchip', title: '右鍵：重新命名／換顏色／解散群組', style: 'background:' + color + ';color:' + fgInk(color) },
+      el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, fg.name), el('span', { class: 'tcount' }, u.folders.length + '·' + total));
+    chip.onclick = toggle(key);
+    chip.oncontextmenu = e => { e.preventDefault(); groupMenu(fg, e.clientX, e.clientY); };
+    dndWire(chip, { type: 'group', key: fg.id }); chip.__block = wrap;
+    wrap.append(chip);
+    if (!collapsed) u.folders.forEach(f => wrap.append(folderUnit(f, fg.id)));
+    return wrap;
+  };
+  const left = $('#tabShort'), right = $('#tabScroll');
+  left.innerHTML = ''; right.innerHTML = '';
+  // 1) 左區（固定）：兩張捷徑虛擬卡片（沒有右鍵功能，只有左鍵跳回去）
+  let anyV = false;
+  for (const [kind, tag] of [['main', '主'], ['sub', '副']]) {
+    const s = byId.get(SHORT[kind]); if (!s) continue;
+    anyV = true;
+    const p = paneOf.get(s.id);
+    const d = el('div', { class: 'tab vcard' + (p === ACTIVE ? ' cur' : p ? ' side' : ''), title: (kind === 'main' ? '最新主視窗' : '最新副視窗') + '（點一下跳回去）\n' + s.title },
+      el('span', { class: 'vtag' }, tag), el('span', { class: 'ttl' }, s.title), el('span', { class: flagOf(s) }));
+    d.onclick = () => (kind === 'main' ? openMain(s.id) : openSub(s.id));
+    d.oncontextmenu = e => e.preventDefault();
+    left.append(d);
   }
+  if (!anyV) left.append(el('div', { class: 'tshint', title: '在主／副視窗真的說話過的對話，會在這裡放一張捷徑卡，點一下跳回去' }, '主／副 捷徑'));
+  // 2) 右區：Web 分頁式——還沒開始說話的新對話（草稿）
+  for (const p of panesOn()) if (pst(p).draft || !pst(p).cur) {
+    const d = el('div', { class: 'tab' + (p === ACTIVE ? ' cur' : ' side') }, el('span', { class: 'ttl' }, '＋ 新對話'));
+    d.onclick = () => setActive(p); right.append(d);
+  }
+  // 3) 釘選、群組、資料夾（同左側列表）
+  if (st.pinned.length) {
+    const collapsed = S.collapsed.has('pinned'), wrap = el('div', { class: 'tfold' + (collapsed ? ' collapsed' : '') });
+    const chip = el('div', { class: 'tchip tfchip' }, el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, '📌 釘選'), el('span', { class: 'tcount' }, st.pinned.length));
+    chip.onclick = toggle('pinned'); wrap.append(chip);
+    if (!collapsed) st.pinned.forEach(s => wrap.append(sessionTab(s, null)));
+    right.append(wrap);
+  }
+  for (const u of st.units) right.append(u.fg ? groupUnit(u) : folderUnit(u.folder, null));
 }
-$('#tabBar').addEventListener('wheel', e => { const b = e.currentTarget; if (b.scrollWidth > b.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) { b.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
+$('#tabScroll').addEventListener('wheel', e => { const b = e.currentTarget; if (b.scrollWidth > b.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) { b.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
 $('#btnTabs').onclick = () => { S.tabsOn = !S.tabsOn; ls('cc_tabs', S.tabsOn ? '1' : '0'); renderTabs(); btwRepos(); };
 // 兩個小半圓儀表（本階段／本週）放在收起後的窄欄下方
 function renderRailGauges() {
@@ -1995,6 +2078,7 @@ function swapPanes() {
   PANE.L = R; PANE.R = L; R.key = 'L'; L.key = 'R'; R.el.dataset.pane = 'L'; L.el.dataset.pane = 'R';
   R.hdr.splitClose.hidden = true; R.hdr.swap.hidden = true; L.hdr.splitClose.hidden = false; L.hdr.swap.hidden = false;
   L.T.scrollTop = sL; R.T.scrollTop = sR;
+  [SHORT.main, SHORT.sub] = [SHORT.sub, SHORT.main]; saveShort();
   updateFocusMarks(); renderTabs(); renderSidebar();
   if (typeof btwRepos === 'function') btwRepos();
   if (typeof ipRepos === 'function') ipRepos();
