@@ -105,7 +105,7 @@ body.dragging { cursor: col-resize; user-select: none; }
 .gadd { border: 0; background: transparent; cursor: pointer; color: var(--muted); padding: 0 4px; border-radius: 4px; visibility: hidden; }
 .ghead:hover .gadd { visibility: visible; }
 .gadd:hover { background: var(--border); color: var(--text); }
-.sitem { display: flex; align-items: center; gap: 8px; padding: 5px 8px 5px 14px; border-radius: 7px; cursor: pointer; }
+.sitem { display: flex; align-items: center; gap: 8px; padding: 5px 8px 5px 10px; border-radius: 7px; cursor: pointer; }
 .sitem:hover { background: var(--panel2); }
 .sitem.active { background: var(--panel2); box-shadow: inset 3px 0 0 var(--accent); }
 .sitem.ishidden { opacity: .55; }
@@ -118,6 +118,7 @@ body.dragging { cursor: col-resize; user-select: none; }
 .dot.run { background: var(--accent); animation: pulse 1.2s infinite; }
 .sflag { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; margin: 0 4px 0 2px; }
 .sflag.wait { background: var(--warn); animation: pulse 1.2s infinite; }
+.sflag.run { background: var(--accent); animation: pulse 1.2s infinite; }
 .sflag.unread { background: var(--link); }
 @keyframes pulse { 50% { opacity: .3; } }
 .more { font-size: 12px; padding: 3px 14px; cursor: pointer; }

@@ -154,14 +154,13 @@ function group(key, label, cwd, items, showFolder) {
 function item(s, showFolder) {
   const run = S.running.has(s.id), wait = S.perms.get(s.id) && S.perms.get(s.id).size;
   const d = el('div', { class: 'sitem' + (shownIds().has(s.id) ? ' active' : '') + (s.hidden ? ' ishidden' : ''), title: `${s.title}\n${s.cwd}` },
-    el('span', { class: 'dot' + (run ? ' run' : '') }),
     el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, S.source === 'all' && s.source === 'desktop' ? el('span', { class: 'srctag', title: '桌面版開的對話' }, '桌面') : null,
         S.renaming === s.id ? renameInput(s) : s.title),
       showFolder ? el('div', { class: 'sfolder muted' }, baseName(s.cwd)) : null),
     el('span', { class: 'stime muted' }, relTime(s.updatedAt)),
-    // 右側狀態點：黃 = 有問題等你回答（許可／詢問）、藍 = 跑完了還沒看（空位固定保留，標題不會頂到邊）
-    el('span', { class: 'sflag' + (wait ? ' wait' : !run && UNREAD.has(s.id) ? ' unread' : ''),
-      title: wait ? 'Claude 正在等你回答' : !run && UNREAD.has(s.id) ? '已完成，尚未查看' : '' }));
+    // 右側狀態點（全部統一在右邊）：黃 = 有問題等你回答、橘閃 = 執行中、藍 = 跑完了還沒看（空位固定保留，標題不會頂到邊）
+    el('span', { class: 'sflag' + (wait ? ' wait' : run ? ' run' : UNREAD.has(s.id) ? ' unread' : ''),
+      title: wait ? 'Claude 正在等你回答' : run ? '執行中' : UNREAD.has(s.id) ? '已完成，尚未查看' : '' }));
   // 點一下開啟；對已經是目前焦點的卡片再點一次（連點也一樣）→ 就地改名。右鍵選單的「重新命名」照舊
   d.onclick = () => { if (S.renaming === s.id) return; if (!S.draft && paneShows(ACTIVE, s.id)) startRename(s); else openHere(s.id); };
   d.oncontextmenu = e => { e.preventDefault(); sessionMenu(s, e.clientX, e.clientY); };
