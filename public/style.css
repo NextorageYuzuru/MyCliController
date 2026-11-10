@@ -102,6 +102,16 @@ body.dragging { cursor: col-resize; user-select: none; }
 .ghead .caret { width: 10px; }
 .ghead .glabel { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ghead .gcount { font-weight: 400; }
+.dragging { opacity: .4; }
+.dz-before { box-shadow: inset 0 3px 0 var(--accent); }
+.dz-after { box-shadow: inset 0 -3px 0 var(--accent); }
+.dz-into { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--panel2); }
+.ghead[draggable=true], .sitem[draggable=true] { cursor: grab; }
+.fgroup { margin-bottom: 6px; border-left: 3px solid var(--fg, #8a8a8a); border-radius: 4px; background: color-mix(in srgb, var(--fg, #8a8a8a) 7%, transparent); }
+.fghead { color: var(--text); }
+.fgchip { width: 8px; height: 8px; border-radius: 50%; background: var(--fg, #8a8a8a); flex-shrink: 0; }
+.fgbody { padding-left: 6px; }
+.fgbody .group { margin-bottom: 2px; }
 .gadd { border: 0; background: transparent; cursor: pointer; color: var(--muted); padding: 0 4px; border-radius: 4px; visibility: hidden; }
 .ghead:hover .gadd { visibility: visible; }
 .gadd:hover { background: var(--border); color: var(--text); }

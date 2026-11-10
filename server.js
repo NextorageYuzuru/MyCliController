@@ -52,7 +52,7 @@ try { store = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8')); } catch {}
 store.sessions = store.sessions || {};
 store.prompts = Array.isArray(store.prompts) ? store.prompts : [];
 store.ctxWindows = store.ctxWindows || {}; // model id -> context window size, as reported by claude (result.modelUsage)
-store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '', windowTheme: 'system' }, store.prefs);
+store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '', windowTheme: 'system', folderGroups: [], folderOrder: [], sessionOrder: {} }, store.prefs);
 let saveTimer = null;
 function flushStore() {
   clearTimeout(saveTimer); saveTimer = null;
@@ -1019,6 +1019,17 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       for (const k of ['model', 'effort', 'permissionMode', 'groupBy', 'lastCwd']) if (k in b) store.prefs[k] = b[k];
       if (['system', 'light', 'dark'].includes(b.windowTheme)) store.prefs.windowTheme = b.windowTheme;
+      if (Array.isArray(b.folderOrder)) store.prefs.folderOrder = b.folderOrder.filter(k => typeof k === 'string').slice(0, 1000).map(k => k.slice(0, 400));
+      if (b.sessionOrder && typeof b.sessionOrder === 'object' && !Array.isArray(b.sessionOrder)) { // 資料夾 → 手動排的對話 id 順序
+        const so = {};
+        for (const [k, v] of Object.entries(b.sessionOrder).slice(0, 500)) if (Array.isArray(v)) so[k.slice(0, 400)] = v.filter(i => typeof i === 'string').slice(0, 1000).map(i => i.slice(0, 80));
+        store.prefs.sessionOrder = so;
+      }
+      if (Array.isArray(b.folderGroups)) { // 左側「資料夾群組」：[{ id, name, color, folders: [小寫 cwd…] }]
+        store.prefs.folderGroups = b.folderGroups.slice(0, 50).filter(g => g && typeof g.id === 'string' && typeof g.name === 'string')
+          .map(g => ({ id: g.id.slice(0, 40), name: g.name.slice(0, 60), color: typeof g.color === 'string' ? g.color.slice(0, 20) : '',
+            folders: Array.isArray(g.folders) ? g.folders.filter(f => typeof f === 'string').slice(0, 500) : [] }));
+      }
       saveStore(); return json(res, 200, { prefs: store.prefs });
     }
     let m = p.match(/^\/api\/sessions\/([0-9a-f-]{36})(?:\/(\w+))?$/i);

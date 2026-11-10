@@ -109,6 +109,7 @@ function visibleSessions() {
 function renderSidebar() {
   renderRailDot(); renderTabs();
   if (S.sbCollapsed) return;
+  if (S.dnd) { S.dndPending = true; return; } // 拖曳中不重畫（會把被拖的節點換掉）；放開後再畫
   const list = $('#sessionList'); list.innerHTML = '';
   const ss = visibleSessions();
   const pinned = ss.filter(s => s.pinned), rest = ss.filter(s => !s.pinned);
@@ -131,22 +132,184 @@ function renderSidebar() {
   } else {
     const groups = new Map();
     for (const s of rest) { const k = (s.cwd || '(未知)').toLowerCase(); if (!groups.has(k)) groups.set(k, { cwd: s.cwd, items: [] }); groups.get(k).items.push(s); }
-    for (const [k, g] of groups) list.append(group('f:' + k, baseName(g.cwd) || '(未知)', g.cwd, g.items));
+    for (const [k, g] of groups) g.items = orderSessions(k, g.items);
+    // 使用者自訂的「資料夾群組」：把多個資料夾合成一區（群組 > 資料夾 > 對話）
+    const placed = new Set(), q = $('#search').value.trim(), units = [];
+    for (const fg of folderGroups()) {
+      const inner = fg.folders.filter(k => groups.has(k));
+      inner.forEach(k => placed.add(k));
+      if (!inner.length && q) continue;
+      units.push({ key: 'g:' + fg.id, node: () => userGroup(fg, inner.map(k => [k, groups.get(k)])) });
+    }
+    for (const [k, g] of groups) if (!placed.has(k)) units.push({ key: 'f:' + k, node: () => group('f:' + k, baseName(g.cwd) || '(未知)', g.cwd, g.items) });
+    // 最上層（群組和資料夾同一位階）照使用者拖出來的順序；沒排過的維持原本順序、排在後面
+    const ord = Array.isArray(S.prefs.folderOrder) ? S.prefs.folderOrder : [];
+    units.forEach((u, i) => { const o = ord.indexOf(u.key); u.rank = o >= 0 ? o : 1e6 + i; });
+    units.sort((a, b) => a.rank - b.rank);
+    S.topKeys = units.map(u => u.key);
+    units.forEach(u => list.append(u.node()));
   }
   if (!ss.length) list.append(el('div', { class: 'empty muted' }, S.sessions.length ? '沒有符合的對話' : '還沒有對話，按「＋ 新對話」開始'));
   const ri = list.querySelector('.renameIn'); if (ri) { ri.focus(); const n = ri.value.length; try { ri.setSelectionRange(n, n); } catch {} }
 }
-function group(key, label, cwd, items, showFolder) {
+// ---- 拖曳排序：群組／資料夾（同一位階）、群組內的資料夾（也能拖進／拖出群組）、資料夾內的對話 ----
+function orderSessions(fk, items) {
+  const o = (S.prefs.sessionOrder || {})[fk]; if (!o || !o.length) return items;
+  const rank = new Map(o.map((id, i) => [id, i]));
+  // 沒排過的（新對話）維持原本的時間順序、放最前面；排過的照使用者的順序
+  return [...items.filter(s => !rank.has(s.id)), ...items.filter(s => rank.has(s.id)).sort((a, b) => rank.get(a.id) - rank.get(b.id))];
+}
+function clearDropMarks() { document.querySelectorAll('.dz-before, .dz-after, .dz-into').forEach(n => n.classList.remove('dz-before', 'dz-after', 'dz-into')); }
+function dndWire(node, info) {
+  node.__dnd = info; node.draggable = true;
+  node.addEventListener('dragstart', e => {
+    e.stopPropagation(); S.dnd = info; node.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', info.key || info.sid || ''); } catch {}
+  });
+  node.addEventListener('dragend', () => {
+    S.dnd = null; node.classList.remove('dragging'); clearDropMarks();
+    if (S.dndPending) { S.dndPending = false; renderSidebar(); }
+  });
+  node.addEventListener('dragover', e => {
+    if (!S.dnd) return;
+    const plan = planDrop(S.dnd, info, e, node);
+    clearDropMarks();
+    if (!plan) return;
+    e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move';
+    node.classList.add('dz-' + plan.pos);
+  });
+  node.addEventListener('drop', e => {
+    if (!S.dnd) return;
+    const plan = planDrop(S.dnd, info, e, node); if (!plan) return;
+    e.preventDefault(); e.stopPropagation();
+    S.dnd = null; S.dndPending = false; clearDropMarks();
+    execDrop(plan);
+  });
+}
+// where on the target the pointer is: before / after (halves), or 'into' for the middle of a group header
+function dropPos(e, node, allowInto) {
+  const r = node.getBoundingClientRect(), y = (e.clientY - r.top) / Math.max(1, r.height);
+  if (allowInto) return y < 0.28 ? 'before' : y > 0.72 ? 'after' : 'into';
+  return y < 0.5 ? 'before' : 'after';
+}
+function planDrop(src, tgt, e, node) {
+  if (src.type === 'session') {
+    if (tgt.type !== 'session' || tgt.fk !== src.fk || tgt.sid === src.sid) return null;
+    return { act: 'sessions', fk: src.fk, sid: src.sid, tsid: tgt.sid, pos: dropPos(e, node) };
+  }
+  if (src.type === 'group') {
+    if (tgt.type === 'session') return null;
+    const tkey = tgt.type === 'group' ? 'g:' + tgt.key : tgt.gid ? 'g:' + tgt.gid : 'f:' + tgt.key; // 拖到群組裡的資料夾上 = 對該群組整體排序
+    if (tkey === 'g:' + src.key) return null;
+    return { act: 'top', skey: 'g:' + src.key, tkey, pos: dropPos(e, node) };
+  }
+  if (src.type === 'folder') {
+    if (tgt.type === 'session') return null;
+    if (tgt.type === 'folder') {
+      if (tgt.key === src.key) return null;
+      if (tgt.gid) return { act: 'intoGroup', fk: src.key, gid: tgt.gid, tfk: tgt.key, pos: dropPos(e, node) };
+      return { act: 'top', skey: 'f:' + src.key, tkey: 'f:' + tgt.key, pos: dropPos(e, node), ungroup: src.key };
+    }
+    const pos = dropPos(e, node, true); // 拖到群組標題：中間 = 放進群組，邊緣 = 排在群組前／後（群組外）
+    if (pos === 'into') return { act: 'intoGroup', fk: src.key, gid: tgt.key, pos: 'into' };
+    return { act: 'top', skey: 'f:' + src.key, tkey: 'g:' + tgt.key, pos, ungroup: src.key };
+  }
+  return null;
+}
+function execDrop(p) {
+  const body = {};
+  if (p.act === 'sessions') {
+    const items = orderSessions(p.fk, visibleSessions().filter(s => !s.pinned && folderKey(s.cwd) === p.fk));
+    const ids = items.map(s => s.id).filter(id => id !== p.sid);
+    let i = ids.indexOf(p.tsid); if (i < 0) i = ids.length; if (p.pos === 'after') i++;
+    ids.splice(i, 0, p.sid);
+    body.sessionOrder = { ...(S.prefs.sessionOrder || {}), [p.fk]: ids };
+  } else if (p.act === 'top') {
+    const keys = (S.topKeys || []).filter(k => k !== p.skey);
+    let i = keys.indexOf(p.tkey); if (i < 0) i = keys.length; if (p.pos === 'after') i++;
+    keys.splice(i, 0, p.skey);
+    body.folderOrder = keys;
+    if (p.ungroup) body.folderGroups = folderGroups().map(g => ({ ...g, folders: g.folders.filter(k => k !== p.ungroup) }));
+  } else if (p.act === 'intoGroup') {
+    body.folderGroups = folderGroups().map(g => {
+      const fs_ = g.folders.filter(k => k !== p.fk);
+      if (g.id !== p.gid) return { ...g, folders: fs_ };
+      let i = p.pos === 'into' ? fs_.length : fs_.indexOf(p.tfk); if (i < 0) i = fs_.length; else if (p.pos === 'after') i++;
+      fs_.splice(i, 0, p.fk); return { ...g, folders: fs_ };
+    });
+  }
+  Object.assign(S.prefs, body); renderSidebar();
+  api('POST', '/api/prefs', body).catch(e => toast('儲存排序失敗: ' + e.message));
+}
+// ---- 資料夾群組（類似瀏覽器的分頁群組，但單位是整個資料夾）----
+const FG_COLORS = ['#4a90d9', '#e0a030', '#3fa66b', '#d9534f', '#9b59b6', '#e67e9a', '#3fb5b5', '#8a8a8a'];
+const folderGroups = () => (Array.isArray(S.prefs.folderGroups) ? S.prefs.folderGroups : []);
+const folderKey = cwd => (cwd || '(未知)').toLowerCase();
+const groupOfFolder = key => folderGroups().find(g => g.folders.includes(key));
+function saveFolderGroups(arr) {
+  S.prefs.folderGroups = arr; renderSidebar();
+  api('POST', '/api/prefs', { folderGroups: arr }).catch(e => toast('儲存群組失敗: ' + e.message));
+}
+function newFolderGroup(key) {
+  const name = prompt('新資料夾群組的名稱', ''); if (name == null || !name.trim()) return;
+  const gs = folderGroups().map(g => ({ ...g, folders: g.folders.filter(k => k !== key) }));
+  gs.push({ id: 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: name.trim(), color: FG_COLORS[gs.length % FG_COLORS.length], folders: [key] });
+  saveFolderGroups(gs);
+}
+function moveFolderToGroup(key, gid) { // gid = null → 移出群組
+  saveFolderGroups(folderGroups().map(g => ({ ...g, folders: g.id === gid ? [...g.folders.filter(k => k !== key), key] : g.folders.filter(k => k !== key) })));
+}
+function folderMenu(cwd, x, y) {
+  const key = folderKey(cwd), cur = groupOfFolder(key);
+  const items = [['＋ 新增資料夾群組…', () => newFolderGroup(key)]];
+  for (const g of folderGroups()) if (!cur || g.id !== cur.id) items.push([`➜ 移到群組「${g.name}」`, () => moveFolderToGroup(key, g.id)]);
+  if (cur) items.push([`✕ 從「${cur.name}」移出`, () => moveFolderToGroup(key, null)]);
+  if (cwd) items.push(['📂 開啟資料夾', () => reveal(cwd)]);
+  showMenu(x, y, items);
+}
+function groupMenu(fg, x, y) {
+  showMenu(x, y, [
+    ['✎ 重新命名群組', () => { const n = prompt('群組名稱', fg.name); if (n != null && n.trim()) saveFolderGroups(folderGroups().map(g => g.id === fg.id ? { ...g, name: n.trim() } : g)); }],
+    ['🎨 換顏色', () => { const i = FG_COLORS.indexOf(fg.color); saveFolderGroups(folderGroups().map(g => g.id === fg.id ? { ...g, color: FG_COLORS[(i + 1) % FG_COLORS.length] } : g)); }],
+    ['解散群組（資料夾回到外面）', () => saveFolderGroups(folderGroups().filter(g => g.id !== fg.id)), 'danger'],
+  ]);
+}
+function userGroup(fg, folders) {
+  const key = 'g:' + fg.id, collapsed = S.collapsed.has(key);
+  const total = folders.reduce((n, [, f]) => n + f.items.length, 0);
+  const box = el('div', { class: 'fgroup' + (collapsed ? ' collapsed' : ''), style: '--fg:' + (fg.color || '#8a8a8a') });
+  const head = el('div', { class: 'ghead fghead', title: '右鍵：重新命名／換顏色／解散群組' },
+    el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'fgchip' }), el('span', { class: 'glabel' }, fg.name),
+    el('span', { class: 'gcount muted' }, folders.length + ' 個資料夾 · ' + total));
+  head.onclick = () => { collapsed ? S.collapsed.delete(key) : S.collapsed.add(key); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
+  head.oncontextmenu = e => { e.preventDefault(); groupMenu(fg, e.clientX, e.clientY); };
+  dndWire(head, { type: 'group', key: fg.id });
+  box.append(head);
+  if (!collapsed) {
+    const body = el('div', { class: 'fgbody' });
+    for (const [k, g] of folders) body.append(group('f:' + k, baseName(g.cwd) || '(未知)', g.cwd, g.items, false, fg.id));
+    if (!folders.length) body.append(el('div', { class: 'more muted' }, '（空的：在資料夾卡片上右鍵 → 移到群組）'));
+    box.append(body);
+  }
+  return box;
+}
+function group(key, label, cwd, items, showFolder, gid) {
   const collapsed = S.collapsed.has(key);
   const g = el('div', { class: 'group' + (collapsed ? ' collapsed' : '') });
   const head = el('div', { class: 'ghead', title: cwd || '' },
     el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'glabel' }, label), el('span', { class: 'gcount muted' }, items.length));
   if (cwd) head.append(el('button', { class: 'gadd', title: '在此資料夾開新對話', onclick: e => { e.stopPropagation(); newDraft(cwd); } }, '＋'));
   head.onclick = () => { collapsed ? S.collapsed.delete(key) : S.collapsed.add(key); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
+  if (cwd) head.oncontextmenu = e => { e.preventDefault(); folderMenu(cwd, e.clientX, e.clientY); }; // 資料夾卡片右鍵：資料夾群組
+  if (cwd) dndWire(head, { type: 'folder', key: folderKey(cwd), gid: gid || null });
   g.append(head);
   if (!collapsed) {
     const max = S.expandedGroups && S.expandedGroups.has(key) ? Infinity : 15;
-    items.slice(0, max).forEach(s => g.append(item(s, showFolder)));
+    items.slice(0, max).forEach(s => {
+      const n = item(s, showFolder);
+      if (cwd && S.renaming !== s.id) dndWire(n, { type: 'session', sid: s.id, fk: folderKey(cwd) });
+      g.append(n);
+    });
     if (items.length > max) g.append(el('div', { class: 'more muted', onclick: () => { (S.expandedGroups ||= new Set()).add(key); renderSidebar(); } }, `顯示其餘 ${items.length - max} 個…`));
   }
   return g;
