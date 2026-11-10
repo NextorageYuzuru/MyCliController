@@ -52,7 +52,7 @@ try { store = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8')); } catch {}
 store.sessions = store.sessions || {};
 store.prompts = Array.isArray(store.prompts) ? store.prompts : [];
 store.ctxWindows = store.ctxWindows || {}; // model id -> context window size, as reported by claude (result.modelUsage)
-store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '' }, store.prefs);
+store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '', windowTheme: 'system' }, store.prefs);
 let saveTimer = null;
 function flushStore() {
   clearTimeout(saveTimer); saveTimer = null;
@@ -762,9 +762,46 @@ function findBrowser() {
     path.join(pf86, 'Google\\Chrome\\Application\\chrome.exe'), path.join(la, 'Google\\Chrome\\Application\\chrome.exe')];
   return c.find(p => { try { return fs.existsSync(p); } catch { return false; } });
 }
+// 視窗最上面那條標題列是 Edge／Chrome 自己畫的，顏色由「瀏覽器設定檔」的外觀偏好決定（網頁的 theme-color 和 DWM 都改不動它）。
+// 開視窗前把設定檔的 browser.theme.color_scheme2 寫成目前主題（0 跟隨系統／1 淺色／2 深色），開出來的標題列就是對的顏色。
+// 只在開窗時生效；這個設定檔的瀏覽器還開著時寫入會被它蓋回去，所以換主題後要關掉視窗再開。
+function applyWindowScheme() {
+  try {
+    const dir = path.join(DATA_DIR, 'browser-profile', 'Default'), f = path.join(dir, 'Preferences');
+    let j = {}; try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+    const v = { system: 0, light: 1, dark: 2 }[store.prefs.windowTheme];
+    j.browser = j.browser || {}; j.browser.theme = j.browser.theme || {};
+    const want = v == null ? 0 : v;
+    j.profile = j.profile || {};
+    const same = j.browser.theme.color_scheme2 === want && j.profile.exit_type === 'Normal';
+    if (same) return;
+    j.browser.theme.color_scheme2 = want;
+    j.profile.exit_type = 'Normal'; j.profile.exited_cleanly = true; // 重開視窗時不要跳「還原頁面」
+    fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(f, JSON.stringify(j));
+  } catch (e) { log('window scheme failed', e.message); }
+}
+// 換主題後「重開視窗」：先請這個設定檔的瀏覽器正常關閉（逾時才強制結束），再照新主題寫入設定檔、開新視窗。
+// 對話內容都在伺服器，重開不會掉；只有輸入框裡還沒送出的草稿會不見。
+function reopenWindow() {
+  const profile = path.join(DATA_DIR, 'browser-profile');
+  const ps = `
+$ProgressPreference = 'SilentlyContinue'
+$prof = $env:CC_PROFILE
+$all = @(Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" | Where-Object { $_.CommandLine -like ('*' + $prof + '*') })
+$main = @($all | Where-Object { $_.CommandLine -notlike '*--type=*' })
+foreach ($m in $main) { $p = Get-Process -Id $m.ProcessId -ErrorAction SilentlyContinue; if ($p) { [void]$p.CloseMainWindow() } }
+$until = (Get-Date).AddSeconds(6)
+while ((Get-Date) -lt $until -and @($main | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }).Count -gt 0) { Start-Sleep -Milliseconds 200 }
+foreach ($a in $all) { Stop-Process -Id $a.ProcessId -Force -ErrorAction SilentlyContinue }
+exit 0`;
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', psEncoded(ps)],
+    { env: { ...process.env, CC_PROFILE: profile }, windowsHide: true, timeout: 20000 },
+    (err) => { if (err) log('reopen: close failed', err.message); setTimeout(openWindow, 400); });
+}
 function openWindow() {
   const url = `http://127.0.0.1:${PORT}/?t=${TOKEN}`;
   const b = findBrowser();
+  if (b) applyWindowScheme();
   if (b) spawn(b, ['--app=' + url, '--user-data-dir=' + path.join(DATA_DIR, 'browser-profile'), '--window-size=1400,900', '--no-first-run', '--no-default-browser-check'], { detached: true, stdio: 'ignore' }).unref();
   else spawn('cmd.exe', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 }
@@ -958,6 +995,11 @@ const server = http.createServer(async (req, res) => {
       setTimeout(() => { respawnSelf(['--no-open']); hardExit(); }, 120);
       return;
     }
+    if (p === '/api/window/reopen' && M === 'POST') {
+      json(res, 200, { ok: true });
+      setTimeout(reopenWindow, 150);
+      return;
+    }
     if (p === '/api/usage/refresh' && M === 'POST') return json(res, 200, { rate: await refreshRate() });
     if (p === '/api/side' && M === 'POST') return json(res, 200, await runSide(await readBody(req)));
     if (p === '/api/prompts' && M === 'GET') return json(res, 200, { prompts: store.prompts });
@@ -976,6 +1018,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/prefs' && M === 'POST') {
       const b = await readBody(req);
       for (const k of ['model', 'effort', 'permissionMode', 'groupBy', 'lastCwd']) if (k in b) store.prefs[k] = b[k];
+      if (['system', 'light', 'dark'].includes(b.windowTheme)) store.prefs.windowTheme = b.windowTheme;
       saveStore(); return json(res, 200, { prefs: store.prefs });
     }
     let m = p.match(/^\/api\/sessions\/([0-9a-f-]{36})(?:\/(\w+))?$/i);

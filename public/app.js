@@ -1702,6 +1702,18 @@ function applyTheme(t) {
   if (t === 'system') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t);
 }
 applyTheme(ls('cc_theme'));
+// 標題列顏色由伺服器在「開視窗」時寫進瀏覽器設定檔（見 server.js applyWindowScheme），所以主題要告訴伺服器
+function saveWindowTheme(t) { S.prefs.windowTheme = t; return api('POST', '/api/prefs', { windowTheme: t }).catch(() => {}); }
+const themeIsDark = t => t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+async function changeTheme(v) {
+  const was = themeIsDark(ls('cc_theme') || 'system');
+  ls('cc_theme', v); applyTheme(v);
+  await saveWindowTheme(v);
+  // 標題列是瀏覽器自己畫的，只在「開視窗」時才會照主題上色：深淺有變就問要不要現在重開視窗
+  if (was !== themeIsDark(v) && confirm('主題已換好。\n\n視窗最上面的標題列要重新開啟視窗才會跟著換色，現在重開嗎？\n（對話都在背景服務裡，不會不見；輸入框裡還沒送出的文字會消失。）')) {
+    api('POST', '/api/window/reopen').catch(() => {});
+  }
+}
 function segRow(label, hint, options, value, onPick) {
   return el('div', { class: 'setrow' },
     el('div', { class: 'setlabel' }, label, hint ? el('div', { class: 'muted small' }, hint) : null),
@@ -1724,7 +1736,7 @@ function renderSettings() {
       el('button', { class: 'btn icon small', title: '重新檢查登入狀態', onclick: () => recheckAuth() }, '↻'),
       el('button', { class: 'btn small' + (a.loggedIn ? '' : ' primary'), title: '開一個 PowerShell 視窗執行 claude auth login', onclick: doLogin }, a.loggedIn ? '換帳號' : '登入')),
     setSection('外觀'),
-    segRow('主題', null, THEMES, ls('cc_theme') || 'system', v => { ls('cc_theme', v); applyTheme(v); }),
+    segRow('主題', '視窗最上面的標題列顏色要「關掉視窗再開」才會跟著換', THEMES, ls('cc_theme') || 'system', v => changeTheme(v)),
     setSection('左側列表'),
     segRow('顯示桌面版暫存對話', 'Claude Desktop 放在 AppData 的暫存 session', { 0: '不顯示', 1: '顯示' }, S.showScratch ? 1 : 0,
       v => { S.showScratch = v === '1'; ls('cc_scratch', S.showScratch ? '1' : '0'); renderSidebar(); }),
@@ -1836,6 +1848,7 @@ updateFocusMarks();
     S.prefs = d.prefs; S.sessions = d.sessions;
     checkVersion(d.version || null);
     if (!GROUP_MODES[S.prefs.groupBy]) S.prefs.groupBy = 'folder';
+    if ((S.prefs.windowTheme || 'system') !== (ls('cc_theme') || 'system')) saveWindowTheme(ls('cc_theme') || 'system');
     renderSortBtn();
     renderAuth(d.auth); renderRate(d.rate);
   } catch (e) { toast('無法連線到伺服器: ' + e.message, 10000); }
