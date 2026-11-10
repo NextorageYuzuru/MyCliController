@@ -634,7 +634,7 @@ function handleLine(run, line) {
       const res = { isError: !!o.is_error, subtype: o.subtype, durationMs: o.duration_ms, usage: o.usage,
         text: o.is_error ? (o.result || (o.errors || []).join('\n') || o.subtype || '') : '' };
       if (run.stopped) { res.isError = false; res.stopped = true; }
-      broadcast({ type: 'result', sid, result: res });
+      broadcast({ type: 'result', sid, result: res, ts: Date.now() });
       // the result tells us about the login: a success while we think we're logged out, or an auth error → re-check
       if ((!res.isError && authInfo && !authInfo.loggedIn) || (res.isError && /log ?in|auth|401|unauthori|credential|token/i.test(res.text))) scheduleAuth(200);
       learnWindow(run, o.modelUsage);
@@ -683,7 +683,7 @@ function finish(run, code) {
   runs.delete(run.id);
   if (!run.gotResult) {
     const res = run.stopped ? { stopped: true } : { isError: true, text: `claude 意外結束 (code ${code})\n${run.stderr.trim()}` };
-    broadcast({ type: 'result', sid: run.id, result: res });
+    broadcast({ type: 'result', sid: run.id, result: res, ts: Date.now() });
   }
   if (code && !run.stopped) log('claude exit', code, run.stderr.slice(-800));
   const r = rec(run.id); r.updatedAt = Date.now(); saveStore();
@@ -707,6 +707,23 @@ function stopRun(id) {
   return true;
 }
 function killTree(pid) { if (!pid) return; try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch {} }
+// Stop every claude we started, save the store, and end this process — used by the 關閉/重啟後端 buttons and by a
+// takeover. killTree detaches taskkill, so the tree is still taken down after process.exit returns.
+function hardExit() {
+  for (const r of runs.values()) { try { r.stopped = true; killTree(r.proc.pid); } catch {} }
+  flushStore();
+  process.exit(0);
+}
+// Start a fresh copy of the current server.js detached (so it outlives us). Used by 重啟後端: the new process reads
+// the code on disk now, so this is also the reliable way to pick up a new version without relaunching start.vbs.
+function respawnSelf(extraArgs) {
+  try {
+    const p = spawn(process.execPath, [path.join(APP_DIR, 'server.js'), ...(extraArgs || [])],
+      { cwd: APP_DIR, env: process.env, detached: true, windowsHide: true, stdio: 'ignore' });
+    p.unref();
+    return true;
+  } catch (e) { log('respawn failed', e.message); return false; }
+}
 
 function answerPerm(id, requestId, a) {
   const run = runs.get(id); const p = run && run.perms.get(requestId);
@@ -846,6 +863,8 @@ function normPath(p) {
 // ---------- HTTP ----------
 const clients = new Set();
 let lastClientSeen = Date.now();
+// set once 關閉/重啟後端 was pressed (or a replacement is taking over): /api/shutdown then quits even while runs wind down
+let forceShutdown = false;
 function broadcast(ev) { const s = 'data: ' + JSON.stringify(ev) + '\n\n'; for (const c of clients) { try { c.write(s); } catch {} } }
 function json(res, code, obj) { const b = JSON.stringify(obj); res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(b); }
 function readBody(req, limit = 80 * 1024 * 1024) {
@@ -909,10 +928,34 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/shutdown' && M === 'POST') { // a newer start of the app wants to take over
       // only a turn that is actually running blocks the restart; idle sessions keep their claude process around
       const busy = [...runs.values()].filter(r => r.turnActive).length;
-      if (busy) return json(res, 409, { busy: true, running: busy });
+      if (busy && !forceShutdown) return json(res, 409, { busy: true, running: busy });
       json(res, 200, { ok: true });
       log('shutting down: replaced by a new start');
-      setTimeout(() => { flushStore(); process.exit(0); }, 100);
+      setTimeout(hardExit, 100);
+      return;
+    }
+    // ⏻ 關閉後端 / ⟳ 重啟後端 (buttons next to ⚙). Only a turn actually replying counts as "busy"; a confirmation
+    // for that is shown client-side and the retry comes back with force=1.
+    if (p === '/api/server/stop' && M === 'POST') {
+      const b = await readBody(req).catch(() => ({}));
+      const force = b.force === true || u.searchParams.get('force') === '1';
+      const busy = [...runs.values()].filter(r => r.turnActive).length;
+      if (busy && !force) return json(res, 409, { busy: true, running: busy });
+      forceShutdown = true;
+      json(res, 200, { ok: true });
+      log('stopping server (manual)');
+      setTimeout(hardExit, 120);
+      return;
+    }
+    if (p === '/api/server/restart' && M === 'POST') {
+      const b = await readBody(req).catch(() => ({}));
+      const force = b.force === true || u.searchParams.get('force') === '1';
+      const busy = [...runs.values()].filter(r => r.turnActive).length;
+      if (busy && !force) return json(res, 409, { busy: true, running: busy });
+      forceShutdown = true; // let the new process take the port even while our claude processes are still dying
+      json(res, 200, { ok: true, restarting: true });
+      log('restarting: starting a new server (current code) and exiting');
+      setTimeout(() => { respawnSelf(['--no-open']); hardExit(); }, 120);
       return;
     }
     if (p === '/api/usage/refresh' && M === 'POST') return json(res, 200, { rate: await refreshRate() });
@@ -1010,32 +1053,43 @@ function portPid(port) {
   }));
 }
 async function takeOver() {
+  // returns 'replaced' (it agreed to quit), 'busy' (a conversation is running there → open a window onto it),
+  // or 'gone' (its process already exited and only the port is on its way to being released → just retry listening)
   const base = `http://127.0.0.1:${PORT}`, headers = { 'x-token': TOKEN, 'content-type': 'application/json' };
-  try {
-    const r = await fetch(base + '/api/shutdown', { method: 'POST', headers, body: '{}' });
-    if (r.ok) return true;              // it agreed to quit
-    if (r.status === 409) return false; // a conversation is running there
-    if (r.status !== 404) return false; // not ours / unexpected
-    // an older version without /api/shutdown: if nothing runs there, end its process
-    const s = await (await fetch(base + '/api/sessions', { headers })).json();
-    if (!Array.isArray(s.sessions) || s.sessions.some(x => x.running)) return false;
-    const pid = await portPid(PORT);
-    if (!pid || pid === process.pid) return false;
-    process.kill(pid);
-    return true;
-  } catch { return false; }
+  for (let i = 0; i < 6; i++) {
+    try {
+      const r = await fetch(base + '/api/shutdown', { method: 'POST', headers, body: '{}' });
+      if (r.ok) return 'replaced';              // it agreed to quit
+      if (r.status === 409) return 'busy';      // a conversation is running there
+      if (r.status !== 404) return 'busy';      // not ours / unexpected
+      // an older version without /api/shutdown: if nothing runs there, end its process
+      const s = await (await fetch(base + '/api/sessions', { headers })).json();
+      if (!Array.isArray(s.sessions) || s.sessions.some(x => x.running)) return 'busy';
+      const pid = await portPid(PORT);
+      if (!pid || pid === process.pid) return 'gone';
+      process.kill(pid);
+      return 'replaced';
+    } catch {
+      // can't reach it: either it already exited (port free — just wait and rebind) or it is still holding the port
+      const pid = await portPid(PORT);
+      if (!pid) return 'gone';
+      await new Promise(res => setTimeout(res, 250));
+    }
+  }
+  return 'busy';
 }
 let tookOver = false, listenTries = 0;
 server.on('error', async e => {
   if (e.code !== 'EADDRINUSE') { log('server error', e.message); process.exit(1); }
   if (!tookOver) {
     tookOver = true;
-    if (!(await takeOver())) { // busy (or not ours): just open another window onto it
+    const outcome = await takeOver();
+    if (outcome === 'busy') { // busy (or not ours): just open another window onto it
       if (!NO_OPEN) openWindow();
       setTimeout(() => process.exit(0), 300);
       return;
     }
-    log('replaced the previous (idle) server');
+    log(outcome === 'gone' ? 'previous server already exited, waiting for the port' : 'replaced the previous (idle) server');
   }
   if (++listenTries > 40) { if (!NO_OPEN) openWindow(); setTimeout(() => process.exit(1), 300); return; }
   setTimeout(() => server.listen(PORT, '127.0.0.1'), 250); // wait for the old one to let go of the port

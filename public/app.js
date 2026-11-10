@@ -36,6 +36,10 @@ const S = {
   stream: '', loading: false, pending: [], attachments: [], model: '', helloCount: 0, stick: true,
   collapsed: new Set(JSON.parse(ls('cc_collapsed') || '[]')),
 };
+// /btw floating side-chat window (see the bottom of this file for the logic)
+let btwPop = null, btwIn = null, btwAnchor = null, btwScale = 1;
+let btwPane = null;   // the pane the window is docked to (never follows focus)
+let btwBusy = 0;      // how many btw answers are still streaming
 // ---------- panes ----------
 // The content area has one pane (L) or two side by side (L + R, 右側分割視窗). Each pane keeps its own session,
 // draft, transcript and scroll position. The rendering code below works on the globals S / T / tail: the state of
@@ -207,11 +211,6 @@ function renderHead() {
   h.cwd.textContent = S.cwd ? S.cwd : '';
   h.cwd.hidden = !S.cwd;
   h.model.textContent = S.model ? '· ' + S.model : '';
-  for (const b of [h.terminal, h.pin, h.hide, h.del]) b.disabled = !s || draft;
-  if (s) {
-    h.pin.classList.toggle('on', s.pinned); h.hide.classList.toggle('on', s.hidden);
-    h.hide.title = s.hidden ? '取消封存' : '封存（從列表收起，⚙ 設定裡可以選擇顯示已封存）';
-  }
   if (CTX === ACTIVE) document.title = (s && !draft ? s.title + ' — ' : '') + 'CLI Controller';
 }
 // context length: how much of the model's context window this session currently fills
@@ -490,6 +489,7 @@ async function openSession(id, p = ACTIVE) {
     for (const ev of pending) { if (ev.type === 'msg' && seen.has(ev.msg.uuid)) continue; handleEvent(ev); }
     renderHead(); refreshComposer();
     S.stick = true; scrollBottom(true);
+    if (btwPop && !btwPop.hidden) btwRepos(); // 對話在同一个面板被换掉：让小视窗重新对应新的 session
     if (p === ACTIVE) input.focus();
   });
 }
@@ -505,6 +505,7 @@ function renderTranscript() {
   T.append(tail);
   for (let i = start; i < msgs.length; i++) appendMsg(msgs[i]);
   if (!msgs.length) insert(el('div', { class: 'empty muted' }, '（沒有訊息）'));
+  appendLastDoneLine();
   renderSideCards();
   renderStream(); renderPerms(); renderWorking(); renderStrip();
 }
@@ -682,7 +683,7 @@ function scheduleStream() {
 }
 
 // working indicator (each pane has its own)
-setInterval(() => { for (const p of panesOn()) withPane(p, renderWorking); }, 1000);
+setInterval(() => { for (const p of panesOn()) withPane(p, renderWorking); refreshRtimes(); }, 1000);
 function renderWorking() {
   const w = tail && tail.querySelector('.working'); if (!w) return;
   const r = S.cur && S.running.get(S.cur);
@@ -692,6 +693,41 @@ function renderWorking() {
   w.hidden = false;
   w.innerHTML = '';
   w.append(el('span', { class: 'spinner' }), el('span', null, r.activity || '執行中…'), el('span', { class: 'muted' }, ' · ' + t));
+}
+
+// ---------- completion time ("AI 多久以前回覆完成") ----------
+// Shown at the end of a finished reply, never while it is still running. Relative text ("3 分鐘前") that the
+// 1-second interval above keeps fresh; hovering gives the exact clock time.
+function relTime(ts) {
+  const t = Date.parse(ts); if (!t) return '';
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 45) return '剛剛';
+  if (s < 3600) return `${Math.round(s / 60)} 分鐘前`;
+  if (s < 86400) return `${Math.round(s / 3600)} 小時前`;
+  const d = Math.round(s / 86400);
+  if (d < 30) return `${d} 天前`;
+  return new Date(t).toLocaleDateString('zh-TW') + ' 完成';
+}
+function timeSpan(ts) {
+  const t = Date.parse(ts);
+  return el('span', { class: 'rtime', 'data-ts': ts || '', title: t ? '完成於 ' + new Date(t).toLocaleString('zh-TW', { hour12: false }) : '' }, relTime(ts));
+}
+function refreshRtimes() {
+  for (const e of document.querySelectorAll('.rtime')) {
+    const ts = e.getAttribute('data-ts'); if (!ts) continue;
+    const txt = relTime(ts); if (e.textContent !== txt) e.textContent = txt;
+  }
+}
+// when a saved transcript is shown, the ephemeral "✓ 完成" line is gone; leave one faint line under the last
+// reply so it is still clear when the conversation last got an answer (nothing while the AI is still replying)
+function appendLastDoneLine() {
+  if (S.draft || !S.msgs.length) return;
+  if (S.cur && S.running.get(S.cur)) return;
+  for (let i = S.msgs.length - 1; i >= 0; i--) {
+    const m = S.msgs[i];
+    if (m.role === 'assistant') { insert(el('div', { class: 'result muted' }, timeSpan(m.ts))); return; }
+    if (m.role === 'user') return; // nothing after the last prompt yet
+  }
 }
 
 // permission prompts
@@ -837,15 +873,17 @@ function handleEvent(ev) {
       if ((ev.result || {}).stopped) S.stoppedRuns.add(ev.sid);
       inShown(() => {
         const r = ev.result || {}; S.stream = ''; renderStream();
-        let node;
-        if (r.stopped) node = el('div', { class: 'result muted' }, '■ 已停止');
-        else if (r.isError) node = el('div', { class: 'result err' }, '✗ ' + (r.text || r.subtype || '發生錯誤'));
+        const doneTs = new Date(ev.ts || Date.now()).toISOString();
+        let left, cls = 'result muted';
+        if (r.stopped) left = '■ 已停止';
+        else if (r.isError) { left = '✗ ' + (r.text || r.subtype || '發生錯誤'); cls = 'result err'; }
         else {
           const parts = ['✓ 完成'];
           if (r.durationMs) parts.push((r.durationMs / 1000).toFixed(1) + ' 秒');
           if (r.usage && r.usage.output_tokens) parts.push('輸出 ' + r.usage.output_tokens.toLocaleString() + ' tokens');
-          node = el('div', { class: 'result muted' }, parts.join(' · '));
+          left = parts.join(' · ');
         }
+        const node = el('div', { class: cls }, el('span', { class: 'rt' }, left), timeSpan(doneTs));
         const st = nearBottom(); insert(node); if (st) scrollBottom(true);
       });
       if (!visibleHere && !(ev.result || {}).stopped) notify('Claude 完成了', (S.sessions.find(s => s.id === ev.sid) || {}).title || '');
@@ -936,11 +974,6 @@ function openViewer(src, label, filePath) {
   $('#vTitle').textContent = label || ''; $('#vTitle').title = label || '';
   $('#vReveal').hidden = !filePath;
   renderStrip();
-}
-function toggleViewer() {
-  const v = $('#viewer');
-  if (v.hidden) { v.hidden = false; $('#splitter').hidden = false; if (!vCur && S.images.length) { const l = S.images[S.images.length - 1]; openViewer(l.src, l.label, l.filePath); } renderStrip(); }
-  else closeViewer();
 }
 function closeViewer() { $('#viewer').hidden = true; $('#splitter').hidden = true; }
 // the strip lists the images of the active pane's conversation
@@ -1070,8 +1103,8 @@ function runAppCommand(name, arg) {
   switch (name) {
     case 'btw':
       if (S.draft || !S.cur) { toast('/btw 要在已經開始的對話裡使用'); return true; }
-      if (!arg) { toast('用法：/btw 你的問題'); return true; }
-      sideRun('💬 btw：' + arg, { sid: S.cur, kind: 'btw', text: arg });
+      // 客服式小視窗：送出 /btw 的瞬間跳出、答案不再插進對話。延後一拍再開，避開 send() 結束時對輸入框的 focus
+      setTimeout(() => { btwShow(); if (arg) runBtw(arg); }, 0);
       return true;
     case 'usage': case 'context':
       if (arg) return false;
@@ -1099,7 +1132,7 @@ function runAppCommand(name, arg) {
   return false;
 }
 
-// side cards: output that is shown here but never written into the conversation (/btw, /usage, /context)
+// inline side cards: output shown here but never written into the conversation (/usage, /context). /btw 改用浮動小視窗
 S.side = new Map(); // 'sid:<id>' or 'cwd:<path>' -> [{id, title, state, text, isError}]
 function sideList(key = cmdKeyCwd()) { if (!S.side.has(key)) S.side.set(key, []); return S.side.get(key); }
 function placeCard(node) { if (tail && tail.parentNode === T) insert(node); else T.append(node); }
@@ -1263,19 +1296,42 @@ document.addEventListener('keydown', e => {
 // ---------- misc ----------
 $('#btnNew').onclick = () => newDraft();
 $('#search').addEventListener('input', renderSidebar);
-S.source = ['all', 'cli', 'desktop'].includes(ls('cc_source')) ? ls('cc_source') : 'all';
-function renderSeg() { document.querySelectorAll('#srcSeg button').forEach(b => b.classList.toggle('on', b.dataset.src === S.source)); }
-document.querySelectorAll('#srcSeg button').forEach(b => b.onclick = () => { S.source = b.dataset.src; ls('cc_source', S.source); renderSeg(); renderSidebar(); });
-renderSeg();
+// 左上半部：來源按鈕，每按一次循環 全部 → CLI → 桌面版
+const SOURCE_ORDER = ['all', 'cli', 'desktop'];
+const SOURCE_LABEL = { all: '全部來源', cli: '只有 CLI', desktop: '只有桌面版' };
+const SOURCE_SHORT = { all: '全部', cli: 'CLI', desktop: '桌面' };
+S.source = SOURCE_ORDER.includes(ls('cc_source')) ? ls('cc_source') : 'all';
+function renderSourceBtn() {
+  const b = $('#btnSource'); if (!b) return;
+  b.textContent = '來源：' + (SOURCE_SHORT[S.source] || '全部');
+  b.title = `顯示哪裡開的對話：${SOURCE_LABEL[S.source] || '全部'}\n（每按一次切換：全部 → CLI → 桌面版）`;
+}
+$('#btnSource').onclick = () => {
+  S.source = SOURCE_ORDER[(SOURCE_ORDER.indexOf(S.source) + 1) % SOURCE_ORDER.length];
+  ls('cc_source', S.source); renderSourceBtn(); renderSidebar();
+};
+renderSourceBtn();
 // ⚙ 設定 → 左側列表: show Desktop temp sessions / archived sessions
 S.showScratch = ls('cc_scratch') === '1';
 S.showHidden = ls('cc_hidden') === '1';
 const GROUP_MODES = { folder: '依資料夾', time: '依時間分段', flat: '時間排序' };
+const SORT_ORDER = ['folder', 'time', 'flat'];
+function renderSortBtn() {
+  const b = $('#btnSort'); if (!b) return;
+  const v = GROUP_MODES[S.prefs.groupBy] ? S.prefs.groupBy : 'folder';
+  b.textContent = '排序：' + GROUP_MODES[v];
+  b.title = `左側列表排列：${GROUP_MODES[v]}\n（每按一次切換：依資料夾 → 依時間分段 → 時間排序）`;
+}
+$('#btnSort').onclick = () => {
+  const cur = GROUP_MODES[S.prefs.groupBy] ? S.prefs.groupBy : 'folder';
+  setGroupBy(SORT_ORDER[(SORT_ORDER.indexOf(cur) + 1) % SORT_ORDER.length]);
+};
 function setGroupBy(v) {
   if (!GROUP_MODES[v]) v = 'folder';
   S.prefs.groupBy = v; api('POST', '/api/prefs', { groupBy: v }).catch(() => {});
-  renderSidebar();
+  renderSidebar(); renderSortBtn();
 }
+renderSortBtn();
 
 // ---------- version ----------
 // page = public/version.json on disk now (what this page and a fresh server would run);
@@ -1293,9 +1349,120 @@ function renderVersion() {
   v.className = old ? 'verwarn' : 'muted small';
   v.textContent = old ? '⚠ 伺服器未重開到新版' : `v${page}`;
   v.title = old
-    ? `伺服器：${server ? 'v' + server : '舊版（沒有版號）'} → 程式：v${page}\n等沒有對話在執行時，關掉 App 再用 start.vbs 開啟就會換成新版。`
+    ? `伺服器：${server ? 'v' + server : '舊版（沒有版號）'} → 程式：v${page}\n按左下角的「⟳ 重啟後端」就會換成新版（不用重開視窗；有對話在執行會先確認）。`
     : `CLI Controller v${page}（畫面和伺服器都是這個版本）`;
 }
+
+// ---------- server control (⏻ 關閉後端 / ⟳ 重啟後端) ----------
+// The claude processes belong to the server, and normally start.vbs is what replaces an idle server. These two
+// buttons do it from inside the window: 關閉後端 ends the server (and every claude it started); 重啟後端 also
+// spawns a fresh server — the current code on disk — on the same port, then reloads this window onto it. So a
+// server-side change takes effect without closing and relaunching the window. A turn that is actually replying
+// triggers a confirm first; the retry comes back with force.
+function setSrvButtons(d) { $('#btnKillServer').disabled = d; $('#btnRestartServer').disabled = d; }
+async function serverCtl(action, body) {
+  let r;
+  try { r = await fetch('/api/server/' + action, { method: 'POST', headers: { 'x-token': TOKEN, 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }); }
+  catch { return { status: 0, body: {} }; }
+  let b = {}; try { b = await r.json(); } catch {}
+  return { status: r.status, body: b };
+}
+function runningTitles() {
+  const ids = new Set([...S.running.keys(), ...S.sessions.filter(s => s.running).map(s => s.id)]);
+  return [...ids].map(id => (S.sessions.find(s => s.id === id) || {}).title).filter(Boolean);
+}
+function busyConfirm(kind, n) {
+  const t = runningTitles();
+  const list = t.length ? '\n\n進行中的對話：\n' + t.slice(0, 6).map(x => '· ' + x).join('\n') + (t.length > 6 ? `\n…（共 ${t.length} 個）` : '') : '';
+  const what = kind === 'restart' ? '重新啟動後端' : '關閉後端';
+  return confirm(`目前有 ${n} 個對話正在執行。\n${what}會先停止這些對話，這一輪還沒跑完的回應會不見。${list}\n\n確定要${what}嗎？`);
+}
+let srvTimer = null;
+function showServerDown(mode) {
+  S.serverDown = mode; S.serverBusy = false;
+  try { if (es) es.close(); } catch {}
+  $('#app').classList.remove('offline');
+  $('#settingsModal').hidden = true;
+  setSrvButtons(true);
+  clearTimeout(srvTimer);
+  $('#serverDown').hidden = false;
+  const title = $('#sdTitle'), bodyEl = $('#sdBody'), retry = $('#sdRetry');
+  bodyEl.innerHTML = '';
+  if (mode === 'restarting') {
+    title.textContent = '正在重新啟動後端…';
+    bodyEl.append(
+      el('div', { class: 'sdspin' }, el('span', { class: 'spinner' })),
+      el('div', { class: 'muted small', style: 'margin-top:10px' }, '新的後端服務啟動中（用的是目前最新版程式），完成後這個視窗會自動重新載入。'));
+    retry.disabled = true; retry.textContent = '請稍候…';
+    pollServerUp();
+  } else {
+    title.textContent = '後端服務已關閉';
+    bodyEl.append(el('div', { class: 'muted', style: 'line-height:1.7' },
+      '背景服務（和它開的 claude 對話）已經完全結束。', el('br'),
+      el('span', { class: 'muted small' }, '要再使用，請雙擊 start.vbs（或開始選單／桌面的「Claude CLI Controller」捷徑）重新啟動，完成後按「重新連線」。')));
+    retry.disabled = false; retry.textContent = '重新連線';
+  }
+}
+function pollServerUp() {
+  let tries = 0;
+  const tick = async () => {
+    let up = false;
+    try { up = (await fetch('/api/init?t=' + encodeURIComponent(TOKEN), { cache: 'no-store' })).ok; } catch {}
+    if (up) { location.reload(); return; }
+    if (++tries >= 44) {
+      $('#sdTitle').textContent = '還沒連回新的後端';
+      const b = $('#sdBody'); b.innerHTML = '';
+      b.append(el('div', { class: 'muted', style: 'line-height:1.7' },
+        '沒有找到新的後端服務。', el('br'),
+        el('span', { class: 'muted small' }, '可能是舊的後端還佔著連線埠。請開工作管理員結束 node.exe，或再雙擊一次 start.vbs，然後按「重新連線」。')));
+      const r = $('#sdRetry'); r.disabled = false; r.textContent = '重新連線';
+      return;
+    }
+    srvTimer = setTimeout(tick, 500);
+  };
+  tick();
+}
+// a server process from before this feature (v1.1.7 and earlier) has no /api/server/*: use /api/shutdown (idle
+// only) and let the launcher bring up the new version. This is only for the one-time transition to v1.1.8.
+async function legacyShutdownAndReload() {
+  let status = 0;
+  try { status = (await fetch('/api/shutdown', { method: 'POST', headers: { 'x-token': TOKEN, 'content-type': 'application/json' }, body: '{}' })).status; } catch {}
+  if (status === 409) { toast('執行中的後端是舊版，還有對話在跑時無法從視窗重啟。請先按 ■ 停止對話，或關掉視窗等它閒置後用 start.vbs 重開。', 9000); return false; }
+  if (status === 0 || status === 200) { showServerDown('stopped'); return true; }
+  toast('這個舊版後端不支援從視窗操作，請用 start.vbs 重新開啟一次。', 9000); return false;
+}
+async function doRestartServer() {
+  if (S.serverDown || S.serverBusy) return;
+  S.serverBusy = true; setSrvButtons(true);
+  try {
+    let { status, body } = await serverCtl('restart');
+    if (status === 404) { await legacyShutdownAndReload(); return; }
+    if (status === 409 && busyConfirm('restart', body.running || 1)) ({ status, body } = await serverCtl('restart', { force: true }));
+    if (status === 404) { await legacyShutdownAndReload(); return; }
+    if (status === 200) { showServerDown('restarting'); return; }
+    if (status !== 409) toast('重新啟動失敗' + (body && body.error ? ': ' + body.error : ''), 6000); // 409 = user cancelled
+  } catch (e) { toast('重新啟動失敗: ' + e.message, 6000); }
+  finally { if (!S.serverDown) { S.serverBusy = false; setSrvButtons(false); } }
+}
+async function doStopServer() {
+  if (S.serverDown || S.serverBusy) return;
+  S.serverBusy = true; setSrvButtons(true);
+  try {
+    let { status, body } = await serverCtl('stop');
+    if (status === 404) { await legacyShutdownAndReload(); return; }
+    if (status === 409 && busyConfirm('stop', body.running || 1)) ({ status, body } = await serverCtl('stop', { force: true }));
+    if (status === 404) { await legacyShutdownAndReload(); return; }
+    if (status === 200) { showServerDown('stopped'); return; }
+    if (status !== 409) toast('關閉後端失敗' + (body && body.error ? ': ' + body.error : ''), 6000);
+  } catch (e) { toast('關閉後端失敗: ' + e.message, 6000); }
+  finally { if (!S.serverDown) { S.serverBusy = false; setSrvButtons(false); } }
+}
+$('#btnRestartServer').onclick = () => doRestartServer();
+$('#btnKillServer').onclick = () => doStopServer();
+$('#sdRetry').onclick = async () => {
+  let up = false; try { up = (await fetch('/api/init?t=' + encodeURIComponent(TOKEN), { cache: 'no-store' })).ok; } catch {}
+  if (up) location.reload(); else toast('後端服務還沒有上線，請先啟動後端再按一次', 4000);
+};
 
 // ---------- settings (⚙) ----------
 // Theme is per window (localStorage); the rest are the same values the other controls use.
@@ -1329,7 +1496,6 @@ function renderSettings() {
     setSection('外觀'),
     segRow('主題', null, THEMES, ls('cc_theme') || 'system', v => { ls('cc_theme', v); applyTheme(v); }),
     setSection('左側列表'),
-    segRow('排列方式', null, GROUP_MODES, S.prefs.groupBy || 'folder', v => setGroupBy(v)),
     segRow('顯示桌面版暫存對話', 'Claude Desktop 放在 AppData 的暫存 session', { 0: '不顯示', 1: '顯示' }, S.showScratch ? 1 : 0,
       v => { S.showScratch = v === '1'; ls('cc_scratch', S.showScratch ? '1' : '0'); renderSidebar(); }),
     segRow('顯示已封存對話', '封存的對話會以淡色顯示，右鍵可以取消封存', { 0: '不顯示', 1: '顯示' }, S.showHidden ? 1 : 0,
@@ -1363,19 +1529,13 @@ function buildPane(key) {
   const q = sel => node.querySelector(sel);
   const p = {
     key, el: node, T: q('.transcript'), tail: null, st: newPaneState(),
-    hdr: { title: q('[data-role=title]'), cwd: q('[data-role=cwd]'), model: q('[data-role=model]'), gallery: q('[data-act=gallery]'),
-      terminal: q('[data-act=terminal]'), pin: q('[data-act=pin]'), hide: q('[data-act=hide]'), del: q('[data-act=delete]'), splitClose: q('[data-act=split-close]') },
+    hdr: { title: q('[data-role=title]'), cwd: q('[data-role=cwd]'), model: q('[data-role=model]'), splitClose: q('[data-act=split-close]') },
   };
-  // header buttons act on this pane's session (the pane is made active by the mousedown before the click)
+  // double-click the title to rename, click the folder chip to reveal it; the rest lives in the card (list) menu
   const run = fn => () => withPane(p, fn);
   const h = p.hdr;
   h.title.ondblclick = run(() => { const s = curSession(); if (s && !S.draft) renameSession(s); });
   h.cwd.onclick = run(() => reveal(S.cwd));
-  h.gallery.onclick = run(() => toggleViewer());
-  h.terminal.onclick = run(() => S.cur && api('POST', `/api/sessions/${S.cur}/terminal`).then(() => toast('已開啟 PowerShell 視窗')).catch(e => toast(e.message)));
-  h.pin.onclick = run(() => { const s = curSession(); if (s) patch(s.id, { pinned: !s.pinned }); });
-  h.hide.onclick = run(() => { const s = curSession(); if (s) archiveSession(s); });
-  h.del.onclick = run(() => { const s = curSession(); if (s && !S.draft) deleteSessionUI(s); });
   h.splitClose.onclick = () => closeRight();
   h.splitClose.hidden = key === 'L';
   p.T.addEventListener('scroll', () => { const st = nearEl(p.T); if (p === CTX) S.stick = st; else p.st.stick = st; });
@@ -1404,6 +1564,9 @@ function setActive(p) {
   if (S.cur && !S.draft) ls('cc_last', S.cur);
   updateFocusMarks();
   refreshComposer(); renderStrip(); renderHead();
+  // 分割視窗下切換焦點：btw 小視窗是綁在「開啟它的那一格」，不跟焦點走。切到別的格 = 當作取消，直接關掉
+  // （AI 還在回答中就先留著，讓答案跑完；切回原來那格會看到）。
+  if (btwPop && !btwPop.hidden && btwPane && p !== btwPane && !btwBusy) btwCancel();
   input.focus();
 }
 // 右側分割視窗: show a session in the right pane (replaces whatever was there; at most two panes)
@@ -1417,6 +1580,7 @@ function openRight(sid) {
 function closeRight() {
   const R = PANE.R;
   if (R.el.hidden) return;
+  if (btwPop && !btwPop.hidden && btwPane === R) btwCancel(); // 小視窗綁在右格：右格要關了，一起關掉
   if (ACTIVE === R) setActive(PANE.L);
   R.st = newPaneState(); R.tail = null; R.T.innerHTML = '';
   R.el.hidden = true;
@@ -1437,6 +1601,7 @@ updateFocusMarks();
     S.prefs = d.prefs; S.sessions = d.sessions;
     checkVersion(d.version || null);
     if (!GROUP_MODES[S.prefs.groupBy]) S.prefs.groupBy = 'folder';
+    renderSortBtn();
     renderAuth(d.auth); renderRate(d.rate);
   } catch (e) { toast('無法連線到伺服器: ' + e.message, 10000); }
   connect();
@@ -1446,3 +1611,94 @@ updateFocusMarks();
   if (last && S.sessions.some(s => s.id === last)) openSession(last); else newDraft();
   renderSidebar();
 })();
+
+// ---------- /btw 順帶一提：客服式浮動小視窗 ----------
+// 懸在右側對話區上方、靠左對齊到文字行首；答案只顯示在這裡，不會寫進對話，也不插進訊息串。
+// 開啟：打 /btw 送出、或按送出鈕左邊的 💬（會直接焦點到輸入欄）。再按一次 💬 或 ✕／Esc 關閉；
+// ⤢ 在「一半 / 三分之二」兩種高度間切換。綁在開啟時作用中的那個分割面板與 session。
+function btwEnsure() {
+  if (btwPop) return btwPop;
+  btwPop = el('div', { class: 'btw' + (btwScale === 2 ? ' btw-lg' : ''), id: 'btwPop', hidden: true },
+    el('div', { class: 'btwhd' },
+      el('span', { class: 'btwtt', id: 'btwTitle' }, '💬 順帶一提'),
+      el('button', { class: 'btn icon small', id: 'btwSize', title: '切換小視窗大小（一半 / 三分之二）' }, btwScale === 2 ? '½' : '⅔'),
+      el('button', { class: 'btn icon small', id: 'btwClose', title: '關閉 (Esc)' }, '✕')),
+    el('div', { class: 'btwthread', id: 'btwThread' }),
+    el('div', { class: 'btwrow' },
+      el('input', { id: 'btwInput', class: 'btwin', type: 'text', placeholder: '順帶問一個問題，Enter 送出（不會寫進對話）…' }),
+      el('button', { class: 'btn primary small', id: 'btwSendB', title: '送出 (Enter)' }, '送出')));
+  ($('#main') || document.body).append(btwPop);
+  btwIn = $('#btwInput');
+  $('#btwClose').onclick = btwHide;
+  $('#btwSize').onclick = btwSizeToggle;
+  $('#btwSendB').onclick = btwSend;
+  btwIn.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); btwSend(); }
+    else if (e.key === 'Escape') { e.preventDefault(); btwHide(); }
+  });
+  return btwPop;
+}
+function btwThread() { return $('#btwThread'); }
+function btwSizeToggle() {
+  btwScale = btwScale === 1 ? 2 : 1; ls('cc_btw', String(btwScale));
+  btwPop.classList.toggle('btw-lg', btwScale === 2);
+  $('#btwSize').textContent = btwScale === 2 ? '½' : '⅔';
+  btwRepos(); btwIn.focus();
+}
+// dock to the pane it was opened in (btwPane, never ACTIVE), align to that transcript's top/left, size by btwScale
+function btwRepos() {
+  if (!btwPop || btwPop.hidden) return;
+  if (!btwPane || btwPane.el.hidden) { btwCancel(); return; }  // 那個分割格已經被關掉 → 小視窗也關掉
+  const pane = btwPane, T = pane.T, cs = getComputedStyle(T);
+  if (btwPop.parentElement !== pane.el) pane.el.append(btwPop);
+  const pl = parseFloat(cs.paddingLeft) || 0, pt = parseFloat(cs.paddingTop) || 0;
+  btwPop.style.left = pl + 'px';
+  btwPop.style.top = Math.round(T.offsetTop + pt + 4) + 'px';
+  btwPop.style.width = Math.round(Math.min(T.clientWidth - pl * 2, 860)) + 'px';
+  btwPop.style.height = Math.round(T.clientHeight * (btwScale === 2 ? 0.66 : 0.5)) + 'px';
+  const st = pst(pane), sid = (!st.draft && st.cur) ? st.cur : null;
+  if (sid !== btwAnchor) { btwAnchor = sid; btwThread().innerHTML = ''; }
+  const s = sid ? S.sessions.find(x => x.id === sid) : null;
+  $('#btwTitle').textContent = '💬 順帶一提' + (s ? ' · ' + (s.title || '') : '');
+}
+function btwShow() {
+  btwEnsure();
+  btwPane = ACTIVE;               // 綁在目前作用中的那一格
+  const st = pst(btwPane);
+  if (st.draft || !st.cur) { btwPane = null; toast('先在對話裡才能用「順帶一提」'); return; }
+  btwPop.classList.toggle('btw-lg', btwScale === 2);
+  $('#btwSize').textContent = btwScale === 2 ? '½' : '⅔';
+  btwPop.hidden = false; btwRepos(); btwIn.focus();
+}
+function btwHide() { if (btwPop) btwPop.hidden = true; input.focus(); }   // 手動關閉：保留內容，之後開同一個對話還在
+function btwCancel() {                                                        // 切焦點/關格子：當作沒開過
+  if (!btwPop) return;
+  btwPop.hidden = true; btwThread().innerHTML = ''; btwAnchor = null; btwPane = null;
+}
+function btwToggle() { if (btwPop && !btwPop.hidden && btwIn === document.activeElement) btwHide(); else btwShow(); }
+function runBtw(text) {
+  text = String(text || '').trim(); if (!text) return;
+  const sid = btwAnchor;
+  if (!sid) { toast('/btw 要在已經開始的對話裡使用'); return; }
+  const th = btwThread();
+  const q = el('div', { class: 'btwq' }, el('b', null, '我'), el('span', null, text));
+  const a = el('div', { class: 'btwa run' }, el('span', { class: 'spinner' }), ' 思考中…（不影響原本的對話）');
+  th.append(q, a); th.scrollTop = th.scrollHeight;
+  btwBusy++;
+  api('POST', '/api/side', { sid, kind: 'btw', text })
+    .then(r => {
+      a.className = 'btwa md' + (r.isError ? ' err' : '');
+      a.innerHTML = window.md(r.text || (r.isError ? '（發生錯誤）' : '（沒有輸出）'));
+      decorateImgLinks(a);
+    })
+    .catch(e => { a.className = 'btwa err'; a.textContent = e.message; })
+    .finally(() => { btwBusy = Math.max(0, btwBusy - 1); th.scrollTop = th.scrollHeight; });
+}
+function btwSend() {
+  const v = btwIn.value.trim(); if (!v) return;
+  btwIn.value = ''; runBtw(v); btwIn.focus();
+}
+$('#btwBtn').onclick = btwToggle;
+addEventListener('resize', () => { if (btwPop && !btwPop.hidden) btwRepos(); });
+btwScale = (ls('cc_btw') === '2' ? 2 : 1);
+btwEnsure();

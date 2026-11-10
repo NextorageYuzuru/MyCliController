@@ -17,8 +17,9 @@
     <div class="sb-tools">
       <input id="search" type="search" placeholder="搜尋對話 / 資料夾…">
     </div>
-    <div class="seg" id="srcSeg" title="要顯示哪裡開的對話">
-      <button data-src="all">全部</button><button data-src="cli">CLI</button><button data-src="desktop">桌面版</button>
+    <div class="seg" id="modeSeg">
+      <button id="btnSource" type="button"></button>
+      <button id="btnSort" type="button"></button>
     </div>
     <div id="sessionList"></div>
     <div class="sb-foot">
@@ -38,6 +39,8 @@
       </div>
       <div class="footrow">
         <div id="verLine" class="muted small"></div>
+        <button id="btnKillServer" class="btn icon small" title="關閉後端（結束背景服務和它開的 claude 對話；有對話在執行會先確認）">⏻</button>
+        <button id="btnRestartServer" class="btn icon small" title="重啟後端（不用重開視窗，換成新版；有對話在執行會先確認）">⟳</button>
         <span class="grow"></span>
         <button id="btnSettings" class="btn icon" title="設定（帳號、外觀、左側列表、對話…）">⚙</button>
       </div>
@@ -55,11 +58,6 @@
             <div class="hsub"><span class="chip hcwd" data-role="cwd" title="在檔案總管開啟"></span><span class="muted small" data-role="model"></span></div>
           </div>
           <div class="hright">
-            <button class="btn icon" data-act="gallery" title="圖片面板">🖼</button>
-            <button class="btn icon" data-act="terminal" title="在 PowerShell 開啟此 session (claude --resume)">⌨</button>
-            <button class="btn icon" data-act="pin" title="釘選">📌</button>
-            <button class="btn icon" data-act="hide" title="封存（從列表收起，⚙ 設定裡可以選擇顯示已封存）">🗄</button>
-            <button class="btn icon" data-act="delete" title="刪除這個對話（移到資源回收筒）">🗑</button>
             <button class="btn icon" data-act="split-close" title="關閉右側分割視窗">✕</button>
           </div>
         </header>
@@ -123,6 +121,7 @@
         <button id="btnPrompts" class="btn icon" title="常用 Prompt (Ctrl+/，或在輸入框開頭打 //)">⚡</button>
         <button id="btnAttach" class="btn icon" title="附加圖片">📎</button>
         <input id="fileInput" type="file" accept="image/*" multiple hidden>
+        <button id="btwBtn" class="btn icon" title="順帶一提（快速問一個不寫進對話的問題；或打 /btw）">💬</button>
         <button id="btnStop" class="btn danger" hidden>■ 停止</button>
         <button id="btnSend" class="btn primary">送出 ➤</button>
       </div>
@@ -159,6 +158,16 @@
     <div class="mhead"><h3>⚙ 設定</h3><span class="grow"></span><button id="setClose" class="btn icon" title="關閉 (Esc)">✕</button></div>
     <div id="setBody"></div>
     <div class="muted small">設定會立即套用，不用儲存。</div>
+  </div>
+</div>
+<div id="serverDown" class="modalbg srvdown" hidden>
+  <div class="modal">
+    <h3 id="sdTitle"></h3>
+    <div id="sdBody"></div>
+    <div class="mbtns">
+      <span class="grow"></span>
+      <button id="sdRetry" class="btn primary">重新連線</button>
+    </div>
   </div>
 </div>
 <div id="menu" hidden></div>
