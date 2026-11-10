@@ -802,7 +802,7 @@ function openWindow() {
   const url = `http://127.0.0.1:${PORT}/?t=${TOKEN}`;
   const b = findBrowser();
   if (b) applyWindowScheme();
-  if (b) spawn(b, ['--app=' + url, '--user-data-dir=' + path.join(DATA_DIR, 'browser-profile'), '--window-size=1400,900', '--no-first-run', '--no-default-browser-check'], { detached: true, stdio: 'ignore' }).unref();
+  if (b) spawn(b, ['--app=' + url, '--user-data-dir=' + path.join(DATA_DIR, 'browser-profile'), '--window-size=1400,900', '--no-first-run', '--no-default-browser-check', '--disable-features=Translate'], { detached: true, stdio: 'ignore' }).unref();
   else spawn('cmd.exe', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 }
 function psEncoded(script) { return Buffer.from(script, 'utf16le').toString('base64'); }

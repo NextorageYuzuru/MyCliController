@@ -274,12 +274,18 @@ function groupMenu(fg, x, y) {
     ['解散群組（資料夾回到外面）', () => saveFolderGroups(folderGroups().filter(g => g.id !== fg.id)), 'danger'],
   ]);
 }
+// 群組名稱塗滿顏色底（像瀏覽器的分頁群組標籤）：依底色亮度選黑／白字
+function fgInk(hex) {
+  const n = parseInt(String(hex).slice(1), 16); if (isNaN(n)) return '#fff';
+  return (0.299 * (n >> 16 & 255) + 0.587 * (n >> 8 & 255) + 0.114 * (n & 255)) > 160 ? '#1f1e1c' : '#fff';
+}
 function userGroup(fg, folders) {
   const key = 'g:' + fg.id, collapsed = S.collapsed.has(key);
   const total = folders.reduce((n, [, f]) => n + f.items.length, 0);
   const box = el('div', { class: 'fgroup' + (collapsed ? ' collapsed' : ''), style: '--fg:' + (fg.color || '#8a8a8a') });
   const head = el('div', { class: 'ghead fghead', title: '右鍵：重新命名／換顏色／解散群組' },
-    el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'fgchip' }), el('span', { class: 'glabel' }, fg.name),
+    el('span', { class: 'caret' }, collapsed ? '▸' : '▾'),
+    el('span', { class: 'glabel' }, el('span', { class: 'fgname', style: 'background:' + (fg.color || '#8a8a8a') + ';color:' + fgInk(fg.color || '#8a8a8a') }, fg.name)),
     el('span', { class: 'gcount muted' }, folders.length + ' 個資料夾 · ' + total));
   head.onclick = () => { collapsed ? S.collapsed.delete(key) : S.collapsed.add(key); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
   head.oncontextmenu = e => { e.preventDefault(); groupMenu(fg, e.clientX, e.clientY); };
@@ -1936,7 +1942,7 @@ function buildPane(key) {
   const q = sel => node.querySelector(sel);
   const p = {
     key, el: node, T: q('.transcript'), tail: null, st: newPaneState(),
-    hdr: { title: q('[data-role=title]'), cwd: q('[data-role=cwd]'), model: q('[data-role=model]'), splitClose: q('[data-act=split-close]') },
+    hdr: { title: q('[data-role=title]'), cwd: q('[data-role=cwd]'), model: q('[data-role=model]'), splitClose: q('[data-act=split-close]'), swap: q('[data-act=split-swap]') },
   };
   // double-click the title to rename, click the folder chip to reveal it; the rest lives in the card (list) menu
   const run = fn => () => withPane(p, fn);
@@ -1945,6 +1951,8 @@ function buildPane(key) {
   h.cwd.onclick = run(() => reveal(S.cwd));
   h.splitClose.onclick = () => closeRight();
   h.splitClose.hidden = key === 'L';
+  h.swap.onclick = () => swapPanes();
+  h.swap.hidden = key === 'L';
   p.T.addEventListener('scroll', () => { const st = nearEl(p.T); if (p === CTX) S.stick = st; else p.st.stick = st; });
   p.T.addEventListener('click', onTranscriptClick);
   node.addEventListener('mousedown', () => setActive(p), true);
@@ -1978,6 +1986,18 @@ function setActive(p) {
   // （AI 還在回答中就先留著，讓答案跑完；切回原來那格會看到）。
   if (btwPop && !btwPop.hidden && btwPane && p !== btwPane && !btwBusy) btwCancel();
   input.focus();
+}
+// 跟主視窗互換：右邊這格變成主視窗（L）、原本的主視窗變成副視窗（R）。只換位置，內容、捲動位置、草稿都留在各自那格
+function swapPanes() {
+  const L = PANE.L, R = PANE.R; if (R.el.hidden) return;
+  const sL = L.T.scrollTop, sR = R.T.scrollTop;
+  L.el.parentNode.insertBefore(R.el, L.el);          // 搬 DOM 會讓捲動歸零，下面再還原
+  PANE.L = R; PANE.R = L; R.key = 'L'; L.key = 'R'; R.el.dataset.pane = 'L'; L.el.dataset.pane = 'R';
+  R.hdr.splitClose.hidden = true; R.hdr.swap.hidden = true; L.hdr.splitClose.hidden = false; L.hdr.swap.hidden = false;
+  L.T.scrollTop = sL; R.T.scrollTop = sR;
+  updateFocusMarks(); renderTabs(); renderSidebar();
+  if (typeof btwRepos === 'function') btwRepos();
+  if (typeof ipRepos === 'function') ipRepos();
 }
 // 右側分割視窗: show a session in the right pane (replaces whatever was there; at most two panes)
 function openRight(sid) {
