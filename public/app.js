@@ -70,6 +70,17 @@ const shownIds = () => new Set(panesOn().filter(p => !pst(p).draft && pst(p).cur
 const panesShowing = sid => panesOn().filter(p => paneShows(p, sid));
 
 // ---------- helpers ----------
+// 未讀完成（藍點）：沒在畫面上的對話跑完了，直到使用者看到它為止；存在 localStorage，重新整理也還在
+const UNREAD = new Set(JSON.parse(ls('cc_unread') || '[]'));
+function saveUnread() { ls('cc_unread', JSON.stringify([...UNREAD])); }
+function markUnread(id) { if (!UNREAD.has(id)) { UNREAD.add(id); saveUnread(); } }
+// the sessions on screen count as read — but only while this window has focus
+function clearShownUnread() {
+  if (!document.hasFocus()) return;
+  let ch = false; for (const p of panesOn()) { const id = pst(p).cur; if (id && UNREAD.delete(id)) ch = true; }
+  if (ch) { saveUnread(); renderSidebar(); }
+}
+addEventListener('focus', clearShownUnread);
 function relTime(ts) {
   if (!ts) return '';
   const d = (Date.now() - ts) / 1000;
@@ -96,6 +107,8 @@ function visibleSessions() {
     (!q || (s.title + ' ' + s.cwd + ' ' + (s.lastPrompt || '')).toLowerCase().includes(q)));
 }
 function renderSidebar() {
+  renderRailDot(); renderTabs();
+  if (S.sbCollapsed) return;
   const list = $('#sessionList'); list.innerHTML = '';
   const ss = visibleSessions();
   const pinned = ss.filter(s => s.pinned), rest = ss.filter(s => !s.pinned);
@@ -121,6 +134,7 @@ function renderSidebar() {
     for (const [k, g] of groups) list.append(group('f:' + k, baseName(g.cwd) || '(未知)', g.cwd, g.items));
   }
   if (!ss.length) list.append(el('div', { class: 'empty muted' }, S.sessions.length ? '沒有符合的對話' : '還沒有對話，按「＋ 新對話」開始'));
+  const ri = list.querySelector('.renameIn'); if (ri) { ri.focus(); const n = ri.value.length; try { ri.setSelectionRange(n, n); } catch {} }
 }
 function group(key, label, cwd, items, showFolder) {
   const collapsed = S.collapsed.has(key);
@@ -140,13 +154,37 @@ function group(key, label, cwd, items, showFolder) {
 function item(s, showFolder) {
   const run = S.running.has(s.id), wait = S.perms.get(s.id) && S.perms.get(s.id).size;
   const d = el('div', { class: 'sitem' + (shownIds().has(s.id) ? ' active' : '') + (s.hidden ? ' ishidden' : ''), title: `${s.title}\n${s.cwd}` },
-    el('span', { class: 'dot' + (wait ? ' wait' : run ? ' run' : '') }),
-    el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, S.source === 'all' && s.source === 'desktop' ? el('span', { class: 'srctag', title: '桌面版開的對話' }, '桌面') : null, s.title),
+    el('span', { class: 'dot' + (run ? ' run' : '') }),
+    el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, S.source === 'all' && s.source === 'desktop' ? el('span', { class: 'srctag', title: '桌面版開的對話' }, '桌面') : null,
+        S.renaming === s.id ? renameInput(s) : s.title),
       showFolder ? el('div', { class: 'sfolder muted' }, baseName(s.cwd)) : null),
-    el('span', { class: 'stime muted' }, relTime(s.updatedAt)));
-  d.onclick = () => openHere(s.id);
+    el('span', { class: 'stime muted' }, relTime(s.updatedAt)),
+    // 右側狀態點：黃 = 有問題等你回答（許可／詢問）、藍 = 跑完了還沒看（空位固定保留，標題不會頂到邊）
+    el('span', { class: 'sflag' + (wait ? ' wait' : !run && UNREAD.has(s.id) ? ' unread' : ''),
+      title: wait ? 'Claude 正在等你回答' : !run && UNREAD.has(s.id) ? '已完成，尚未查看' : '' }));
+  // 點一下開啟；對已經是目前焦點的卡片再點一次（連點也一樣）→ 就地改名。右鍵選單的「重新命名」照舊
+  d.onclick = () => { if (S.renaming === s.id) return; if (!S.draft && paneShows(ACTIVE, s.id)) startRename(s); else openHere(s.id); };
   d.oncontextmenu = e => { e.preventDefault(); sessionMenu(s, e.clientX, e.clientY); };
   return d;
+}
+function startRename(s) {
+  S.renaming = s.id; S.renameText = s.title; renderSidebar();
+  const i = document.querySelector('#sessionList .renameIn'); if (i) { i.focus(); i.select(); }
+}
+function renameInput(s) {
+  let done = false;
+  const finish = ok => {
+    if (done) return; done = true;
+    const t = i.value.trim(); S.renaming = null;
+    if (ok && t !== s.title) patch(s.id, { title: t }); else renderSidebar();
+  };
+  const i = el('input', { class: 'renameIn', type: 'text', value: S.renameText != null ? S.renameText : s.title, maxlength: '200', spellcheck: 'false' });
+  i.oninput = () => { S.renameText = i.value; };
+  i.onclick = e => e.stopPropagation();
+  i.ondblclick = e => e.stopPropagation();
+  i.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); finish(true); } else if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
+  i.onblur = () => finish(true);
+  return i;
 }
 // click in the list: if the other pane already shows it, go there; otherwise open it in the active pane
 function openHere(id) {
@@ -351,6 +389,7 @@ async function send(override) {
       await loadSessions();
     }
     const id = pst(p).cur;
+    promoteTab(id);
     if (S.running.has(id)) { // Claude is busy: park it in the queue (like the Desktop app); 插話 sends it in now
       enqueue(id, text, atts);
       if (useInput) clearComposerOf(p);
@@ -463,6 +502,7 @@ async function openSession(id, p = ACTIVE) {
   withPane(p, () => {
     S.draft = null; S.cur = id; S.cwd = (curSession() || {}).cwd || ''; S.model = ''; S.ctx = null;
     if (p === ACTIVE) ls('cc_last', id);
+    if (UNREAD.delete(id)) saveUnread();
     renderCtx(); renderSidebar(); renderHead(); refreshComposer();
     T.innerHTML = ''; T.append(el('div', { class: 'loading muted' }, '載入中…'));
     S.loading = true; S.pending = []; S.showAllMsgs = false;
@@ -698,7 +738,7 @@ function renderWorking() {
 // ---------- completion time ("AI 多久以前回覆完成") ----------
 // Shown at the end of a finished reply, never while it is still running. Relative text ("3 分鐘前") that the
 // 1-second interval above keeps fresh; hovering gives the exact clock time.
-function relTime(ts) {
+function agoText(ts) {
   const t = Date.parse(ts); if (!t) return '';
   const s = Math.max(0, Math.round((Date.now() - t) / 1000));
   if (s < 45) return '剛剛';
@@ -710,12 +750,12 @@ function relTime(ts) {
 }
 function timeSpan(ts) {
   const t = Date.parse(ts);
-  return el('span', { class: 'rtime', 'data-ts': ts || '', title: t ? '完成於 ' + new Date(t).toLocaleString('zh-TW', { hour12: false }) : '' }, relTime(ts));
+  return el('span', { class: 'rtime', 'data-ts': ts || '', title: t ? '完成於 ' + new Date(t).toLocaleString('zh-TW', { hour12: false }) : '' }, agoText(ts));
 }
 function refreshRtimes() {
   for (const e of document.querySelectorAll('.rtime')) {
     const ts = e.getAttribute('data-ts'); if (!ts) continue;
-    const txt = relTime(ts); if (e.textContent !== txt) e.textContent = txt;
+    const txt = agoText(ts); if (e.textContent !== txt) e.textContent = txt;
   }
 }
 // when a saved transcript is shown, the ephemeral "✓ 完成" line is gone; leave one faint line under the last
@@ -886,6 +926,7 @@ function handleEvent(ev) {
         const node = el('div', { class: cls }, el('span', { class: 'rt' }, left), timeSpan(doneTs));
         const st = nearBottom(); insert(node); if (st) scrollBottom(true);
       });
+      if (!(ev.result || {}).stopped && (!shown.length || !document.hasFocus())) { markUnread(ev.sid); renderSidebar(); }
       if (!visibleHere && !(ev.result || {}).stopped) notify('Claude 完成了', (S.sessions.find(s => s.id === ev.sid) || {}).title || '');
       break;
     case 'rate': renderRate(ev.rate); break;
@@ -913,6 +954,7 @@ function fmtWhen(ms) {
 function renderRate(r) {
   if (r) S.rate = r;
   r = S.rate;
+  renderRailGauges();
   const rows = $('#uRows'); rows.innerHTML = '';
   $('#uUpdated').textContent = r && r.receivedAt ? fmtWhen(r.receivedAt) + ' 更新' : '尚無資料，按 ↻';
   $('#uUpdated').title = r && r.receivedAt ? new Date(r.receivedAt).toLocaleString() : '';
@@ -967,17 +1009,22 @@ $('#btnLoginAlert').onclick = doLogin;
 
 // ---------- image viewer (right split) ----------
 let vCur = null;
+const isSplit = () => !PANE.R.el.hidden;
 function openViewer(src, label, filePath) {
   vCur = { src, label, filePath };
+  // 分割模式：太擠，不開右側面板，改成在「自己那一格」裡跳出小視窗（跟 /btw 互斥）
+  if (isSplit()) { closeViewer(); ipShow(ACTIVE); lbFill(); return; }
+  if (ipPop && !ipPop.hidden) ipPop.hidden = true;
   $('#viewer').hidden = false; $('#splitter').hidden = false;
   const img = $('#vImg'); img.src = src; img.hidden = false; $('#vEmpty').hidden = true;
   $('#vTitle').textContent = label || ''; $('#vTitle').title = label || '';
   $('#vReveal').hidden = !filePath;
-  renderStrip();
+  renderStrip(); lbFill();
 }
 function closeViewer() { $('#viewer').hidden = true; $('#splitter').hidden = true; }
 // the strip lists the images of the active pane's conversation
 function renderStrip() {
+  ipStrip();
   inActive(() => {
     const s = $('#vStrip'); if ($('#viewer').hidden) return;
     s.innerHTML = '';
@@ -991,6 +1038,109 @@ function renderStrip() {
   });
 }
 $('#vClose').onclick = closeViewer;
+$('#vZoom').onclick = () => lbOpen();
+
+// ---- 分割模式的圖片小視窗 + 放大燈箱 ----
+let ipPop = null, ipPane = null;
+function ipEnsure() {
+  if (ipPop) return ipPop;
+  ipPop = el('div', { class: 'btw ipop', hidden: true },
+    el('div', { class: 'vhead' },
+      el('span', { class: 'vtitle', id: 'ipTitle' }),
+      el('button', { class: 'btn small', id: 'ipFit', title: '切換 適合視窗 / 原始尺寸' }, '適合'),
+      el('button', { class: 'btn small', id: 'ipReveal', title: '在檔案總管顯示' }, '📂'),
+      el('button', { class: 'btn small', id: 'ipZoom', title: '放大（燈箱）' }, '⤢'),
+      el('button', { class: 'btn icon small', id: 'ipClose', title: '關閉 (Esc)' }, '✕')),
+    el('div', { class: 'ipbody', id: 'ipBody' }, el('img', { id: 'ipImg', alt: '' })),
+    el('div', { class: 'ipstrip', id: 'ipStrip' }));
+  document.body.append(ipPop);
+  $('#ipClose').onclick = closeImgPop;
+  $('#ipZoom').onclick = () => lbOpen();
+  $('#ipFit').onclick = () => { const b = $('#ipBody'); b.classList.toggle('actual'); $('#ipFit').textContent = b.classList.contains('actual') ? '原尺寸' : '適合'; };
+  $('#ipReveal').onclick = () => $('#vReveal').onclick();
+  return ipPop;
+}
+function ipRepos() {
+  if (!ipPop || ipPop.hidden) return;
+  if (!ipPane || ipPane.el.hidden) { closeImgPop(); return; }
+  const T = ipPane.T, cs = getComputedStyle(T);
+  if (ipPop.parentElement !== ipPane.el) ipPane.el.append(ipPop);
+  const pl = parseFloat(cs.paddingLeft) || 0, pt = parseFloat(cs.paddingTop) || 0;
+  ipPop.style.left = pl + 'px';
+  ipPop.style.top = Math.round(T.offsetTop + pt + 4) + 'px';
+  ipPop.style.width = Math.round(Math.min(T.clientWidth - pl * 2, 860)) + 'px';
+  ipPop.style.height = Math.round(T.clientHeight * 0.62) + 'px';
+}
+function ipShow(p) {
+  ipEnsure();
+  if (btwPop && !btwPop.hidden) btwHide();   // 看圖 UI 和 /btw 互斥：開一個就關另一個
+  ipPane = p; ipPop.hidden = false; ipRepos(); ipFill();
+}
+function ipFill() {
+  if (!ipPop || ipPop.hidden || !vCur) return;
+  const img = $('#ipImg'); if (img.getAttribute('src') !== vCur.src) img.src = vCur.src;
+  $('#ipTitle').textContent = vCur.label || ''; $('#ipTitle').title = vCur.label || '';
+  $('#ipReveal').hidden = !vCur.filePath;
+  ipStrip();
+}
+function ipStrip() {
+  if (!ipPop || ipPop.hidden || !ipPane) return;
+  const s = $('#ipStrip'); s.innerHTML = '';
+  const list = pst(ipPane).images || [];
+  for (const im of list) {
+    const t = el('img', { src: im.src, title: im.label || '', class: vCur && vCur.src === im.src ? 'on' : '' });
+    t.onclick = () => openViewer(im.src, im.label, im.filePath);
+    t.onerror = () => t.remove();
+    s.append(t);
+  }
+  s.hidden = !list.length;
+}
+function closeImgPop() { if (ipPop) ipPop.hidden = true; }
+addEventListener('resize', () => ipRepos());
+
+let lbEl = null;
+function lbList() { const p = ipPop && !ipPop.hidden && ipPane ? ipPane : ACTIVE; return pst(p).images || []; }
+function lbOpen() {
+  if (!vCur) return;
+  if (!lbEl) {
+    lbEl = el('div', { class: 'lb', hidden: true },
+      el('img', { alt: '' }), el('div', { class: 'lbcap' }),
+      el('button', { class: 'lbbtn lbclose', title: '關閉 (Esc)' }, '✕'),
+      el('button', { class: 'lbbtn lbprev', title: '上一張 (←)' }, '‹'),
+      el('button', { class: 'lbbtn lbnext', title: '下一張 (→)' }, '›'));
+    document.body.append(lbEl);
+    lbEl.addEventListener('click', e => { if (e.target === lbEl || e.target.classList.contains('lbclose')) lbClose(); });
+    lbEl.querySelector('.lbprev').onclick = () => lbStep(-1);
+    lbEl.querySelector('.lbnext').onclick = () => lbStep(1);
+  }
+  lbEl.hidden = false; lbFill();
+}
+function lbClose() { if (lbEl) lbEl.hidden = true; }
+function lbFill() {
+  if (!lbEl || lbEl.hidden || !vCur) return;
+  lbEl.querySelector('img').src = vCur.src; lbEl.querySelector('.lbcap').textContent = vCur.label || '';
+  const multi = lbList().length > 1;
+  lbEl.querySelector('.lbprev').hidden = !multi; lbEl.querySelector('.lbnext').hidden = !multi;
+}
+function lbStep(d) {
+  const L = lbList(), i = L.findIndex(x => vCur && x.src === vCur.src);
+  if (i < 0 || L.length < 2) return;
+  const n = L[(i + d + L.length) % L.length]; openViewer(n.src, n.label, n.filePath);
+}
+// 燈箱開著時 Esc／←／→ 優先給它
+addEventListener('keydown', e => {
+  if (lbEl && !lbEl.hidden) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); lbClose(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); lbStep(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); lbStep(1); }
+  } else if (e.key === 'Escape' && ipPop && !ipPop.hidden && !e.defaultPrevented && document.activeElement !== input) closeImgPop();
+}, true);
+// 分割 ⇄ 單欄切換時，看圖 UI 跟著換形態（面板 ⇄ 小視窗）
+function syncViewerMode() {
+  if (!vCur) return;
+  if (isSplit()) { if (!$('#viewer').hidden) { closeViewer(); ipShow(ACTIVE); } }
+  else if (ipPop && !ipPop.hidden) { const c = vCur; closeImgPop(); openViewer(c.src, c.label, c.filePath); }
+}
 $('#vFit').onclick = () => { const b = $('#vBody'); b.classList.toggle('actual'); $('#vFit').textContent = b.classList.contains('actual') ? '原尺寸' : '適合'; };
 $('#vReveal').onclick = () => {
   if (!vCur || !vCur.filePath) return;
@@ -1295,6 +1445,87 @@ document.addEventListener('keydown', e => {
 
 // ---------- misc ----------
 $('#btnNew').onclick = () => newDraft();
+$('#btnNewRail').onclick = () => newDraft();
+// 整頁縮進去：收起左側列表，右側（對話區）就多出整個寬度；收起時 » 上的小點代表還有黃／藍點的對話
+function applySidebar(collapsed, init) {
+  S.sbCollapsed = collapsed; if (!init) ls('cc_sbcollapsed', collapsed ? '1' : '0');
+  $('#app').classList.toggle('sbcollapsed', collapsed); $('#sbRail').hidden = !collapsed;
+  if (init) return; // 載入階段 PANE 等還沒建好，不能在這裡渲染；之後的啟動流程會 renderSidebar
+  renderRailDot(); renderTabs(); btwRepos();
+  if (!collapsed) renderSidebar();
+}
+// ---- 微縮 UI：用量小儀表 + 頂端分頁列 ----
+S.tabsOn = ls('cc_tabs') === '1';
+try { S.tabOrder = JSON.parse(ls('cc_taborder') || '[]'); } catch { S.tabOrder = []; }
+if (!Array.isArray(S.tabOrder)) S.tabOrder = [];
+function saveTabOrder() { ls('cc_taborder', JSON.stringify(S.tabOrder.slice(0, 200))); }
+// 真的在這個對話繼續作業（送出訊息）→ 移到分頁列最左邊
+function promoteTab(id) {
+  if (!id || S.tabOrder[0] === id) return;
+  S.tabOrder = [id, ...S.tabOrder.filter(x => x !== id)]; saveTabOrder(); renderTabs();
+}
+function renderTabs() {
+  const bar = $('#tabBar'); if (!bar) return;
+  bar.hidden = !(S.sbCollapsed && S.tabsOn);
+  $('#btnTabs').classList.toggle('on', S.tabsOn);
+  if (bar.hidden) return;
+  // 順序是固定的：只看（點分頁、切換瀏覽）不會重排；真的送出訊息繼續作業時才把它移到最左（promoteTab）。
+  // 目前焦點／另一個分割格的分頁只用外觀標示。還沒存的新對話（草稿）暫時放最前面。
+  const vis = S.sessions.filter(s => (S.showHidden || !s.hidden) && (S.showScratch || !s.scratch));
+  const byId = new Map(vis.map(s => [s.id, s]));
+  S.tabOrder = S.tabOrder.filter(id => byId.has(id));
+  const have = new Set(S.tabOrder);
+  const fresh = vis.filter(s => !have.has(s.id)).sort((a, b) => b.updatedAt - a.updatedAt).map(s => s.id);
+  if (!S.tabOrder.length) { const cur = pst(ACTIVE).cur; if (cur && fresh.includes(cur)) fresh.splice(fresh.indexOf(cur), 1), fresh.unshift(cur); }
+  S.tabOrder = S.tabOrder.concat(fresh); saveTabOrder();
+  const paneOf = new Map(panesOn().filter(p => !pst(p).draft && pst(p).cur).map(p => [pst(p).cur, p]));
+  const tabs = panesOn().filter(p => pst(p).draft || !pst(p).cur).map(p => ({ pane: p, draft: true }));
+  for (const id of S.tabOrder) tabs.push({ pane: paneOf.get(id), s: byId.get(id) });
+  bar.innerHTML = '';
+  for (const t of tabs) {
+    const s = t.s, run = s && S.running.has(s.id), wait = s && S.perms.get(s.id) && S.perms.get(s.id).size;
+    const d = el('div', { class: 'tab' + (t.pane === ACTIVE ? ' cur' : t.pane ? ' side' : ''), title: s ? s.title + '\n' + s.cwd : '新對話' },
+      el('span', { class: 'ttl' }, s ? s.title : '＋ 新對話'),
+      s ? el('span', { class: 'sflag' + (wait ? ' wait' : run ? ' run' : UNREAD.has(s.id) ? ' unread' : '') }) : null);
+    if (s) {
+      d.onclick = () => openHere(s.id);
+      d.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
+        ['⫽ 加入到分割畫面', () => (paneShows(PANE.R, s.id) && !PANE.R.el.hidden ? setActive(PANE.R) : openRight(s.id))],
+        ['✎ 重新命名', () => renameSession(s)],
+      ]); };
+    } else d.onclick = () => setActive(t.pane);
+    bar.append(d);
+  }
+}
+$('#btnTabs').onclick = () => { S.tabsOn = !S.tabsOn; ls('cc_tabs', S.tabsOn ? '1' : '0'); renderTabs(); btwRepos(); };
+// 兩個小半圓儀表（本階段／本週）放在收起後的窄欄下方
+function renderRailGauges() {
+  const box = $('#railGauges'); if (!box) return;
+  box.innerHTML = '';
+  const r = S.rate, wins = r && (r.unifiedWindows || (r.rateLimitType ? { [r.rateLimitType]: r } : {})) || {};
+  const now = Date.now() / 1000;
+  for (const [k, lab] of [['five_hour', '階段'], ['seven_day', '本週']]) {
+    const v = wins[k], has = v && v.utilization != null;
+    const expired = has && v.resetsAt && v.resetsAt <= now;
+    const pct = has ? (expired ? 0 : Math.round(v.utilization * 100)) : null;
+    const lv = pct >= 90 ? ' hot' : pct >= 75 ? ' warm' : '';
+    const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg'); svg.setAttribute('viewBox', '0 0 40 23');
+    const path = cls => { const p = document.createElementNS(NS, 'path'); p.setAttribute('d', 'M4 20 A16 16 0 0 1 36 20'); p.setAttribute('pathLength', '100'); p.setAttribute('class', cls); return p; };
+    const val = path('gval'); val.setAttribute('stroke-dasharray', (has ? Math.min(100, pct) : 0) + ' 100');
+    svg.append(path('gtrack'), val);
+    const tip = has ? RATE_NAMES[k] + '：已用 ' + pct + '%' + (v.resetsAt && !expired ? '\n' + fmtWhen(v.resetsAt * 1000) + ' 重置，還有 ' + fmtLeft(v.resetsAt - now) : '') : RATE_NAMES[k] + '：尚無資料';
+    box.append(el('div', { class: 'gauge' + lv, title: tip }, svg, el('div', { class: 'gpct' }, has ? pct + '%' : '–'), el('div', { class: 'glab' }, lab)));
+  }
+}
+function renderRailDot() {
+  const d = $('#railDot'); if (!d) return;
+  const wait = [...S.perms.values()].some(m => m && m.size);
+  const unread = S.sessions.some(s => UNREAD.has(s.id));
+  d.className = wait ? 'wait' : unread ? 'unread' : '';
+}
+$('#btnSbHide').onclick = () => applySidebar(true);
+$('#btnSbShow').onclick = () => applySidebar(false);
+applySidebar(ls('cc_sbcollapsed') === '1', true);
 $('#search').addEventListener('input', renderSidebar);
 // 左上半部：來源按鈕，每按一次循環 全部 → CLI → 桌面版
 const SOURCE_ORDER = ['all', 'cli', 'desktop'];
@@ -1517,6 +1748,7 @@ $('#settingsModal').addEventListener('mousedown', e => { if (e.target.id === 'se
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#settingsModal').hidden) $('#settingsModal').hidden = true; });
 document.addEventListener('keydown', e => {
   if (e.ctrlKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); newDraft(); }
+  if (e.ctrlKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); applySidebar(!S.sbCollapsed); }
 });
 setInterval(() => { if (document.visibilityState === 'visible') renderSidebar(); }, 60000);
 
@@ -1549,6 +1781,7 @@ function updateFocusMarks() {
 }
 function updateSplit() {
   $('#panes').classList.toggle('split', !PANE.R.el.hidden);
+  syncViewerMode();
   updateFocusMarks();
   renderSidebar();
 }
@@ -1562,6 +1795,8 @@ function setActive(p) {
   ACTIVE = p; loadPane(p);
   input.value = p.st.input || ''; autosize();
   if (S.cur && !S.draft) ls('cc_last', S.cur);
+  if (S.cur && UNREAD.delete(S.cur)) { saveUnread(); renderSidebar(); }
+  renderTabs();
   updateFocusMarks();
   refreshComposer(); renderStrip(); renderHead();
   // 分割視窗下切換焦點：btw 小視窗是綁在「開啟它的那一格」，不跟焦點走。切到別的格 = 當作取消，直接關掉
@@ -1581,10 +1816,11 @@ function closeRight() {
   const R = PANE.R;
   if (R.el.hidden) return;
   if (btwPop && !btwPop.hidden && btwPane === R) btwCancel(); // 小視窗綁在右格：右格要關了，一起關掉
+  if (ipPane === R) closeImgPop();
   if (ACTIVE === R) setActive(PANE.L);
   R.st = newPaneState(); R.tail = null; R.T.innerHTML = '';
   R.el.hidden = true;
-  updateSplit();
+  updateSplit(); renderTabs();
 }
 
 PANE.L = buildPane('L');
@@ -1663,6 +1899,7 @@ function btwRepos() {
 }
 function btwShow() {
   btwEnsure();
+  closeImgPop(); if (!$('#viewer').hidden) closeViewer(); // 看圖 UI 和 /btw 互斥
   btwPane = ACTIVE;               // 綁在目前作用中的那一格
   const st = pst(btwPane);
   if (st.draft || !st.cur) { btwPane = null; toast('先在對話裡才能用「順帶一提」'); return; }
