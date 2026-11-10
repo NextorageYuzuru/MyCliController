@@ -1659,6 +1659,7 @@ function renderTabs() {
     bar.append(d);
   }
 }
+$('#tabBar').addEventListener('wheel', e => { const b = e.currentTarget; if (b.scrollWidth > b.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) { b.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
 $('#btnTabs').onclick = () => { S.tabsOn = !S.tabsOn; ls('cc_tabs', S.tabsOn ? '1' : '0'); renderTabs(); btwRepos(); };
 // 兩個小半圓儀表（本階段／本週）放在收起後的窄欄下方
 function renderRailGauges() {
