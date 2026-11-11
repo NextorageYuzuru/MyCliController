@@ -7,7 +7,7 @@ const fsp = fs.promises;
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { spawn, execFile } = require('child_process');
+const { spawn, execFile, execFileSync } = require('child_process');
 
 const PORT = Number(process.env.CLICTRL_PORT) || 47821;
 const APP_DIR = __dirname;
@@ -15,7 +15,41 @@ const DATA_DIR = path.join(APP_DIR, 'data');
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
 const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
-const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+// The PATH this process inherits can be stale: Explorer (and so start.vbs / shortcuts) keeps the PATH it had
+// at sign-in, so a claude installed or added to PATH later is invisible to us although a new PowerShell finds it.
+// Merge in the current PATH from the registry, then look for claude.exe ourselves (spawn without a shell can't
+// run .cmd shims, so an npm-installed claude is used through its cli.js instead).
+function regPath(key) {
+  try {
+    const out = execFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe'),['query', key, '/v', 'Path'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = out.match(/^\s*Path\s+REG_(?:EXPAND_)?SZ[ \t]+([^\r\n]*)/mi);
+    return m ? m[1].replace(/%([^%]+)%/g, (s, v) => process.env[v] || s) : '';
+  } catch { return ''; }
+}
+function freshPath() {
+  const seen = new Set(), dirs = [];
+  for (const d of [process.env.PATH, regPath('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'), regPath('HKCU\\Environment')].join(';').split(';')) {
+    const t = d.trim(); if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); dirs.push(t); }
+  }
+  return dirs;
+}
+function findClaude() {
+  if (process.env.CLAUDE_BIN) return { bin: process.env.CLAUDE_BIN, pre: [] };
+  if (process.platform !== 'win32') return { bin: 'claude', pre: [] };
+  const dirs = freshPath();
+  process.env.PATH = dirs.join(';'); // also helps everything we spawn (claude's own tools, a restarted server)
+  const home = os.homedir();
+  for (const d of [...dirs, path.join(home, '.local', 'bin'), path.join(home, '.claude', 'local')]) {
+    const exe = path.join(d, 'claude.exe'); if (fs.existsSync(exe)) return { bin: exe, pre: [] };
+  }
+  for (const d of [...dirs, path.join(process.env.APPDATA || '', 'npm')]) {
+    const js = path.join(d, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+    if (fs.existsSync(path.join(d, 'claude.cmd')) && fs.existsSync(js)) return { bin: process.execPath, pre: [js] };
+  }
+  return { bin: 'claude', pre: [] };
+}
+const CLAUDE = findClaude();
+const CLAUDE_BIN = CLAUDE.bin;
 const ARGV = new Set(process.argv.slice(2));
 const NO_OPEN = ARGV.has('--no-open');
 const KEEP_ALIVE = ARGV.has('--keep-alive');
@@ -347,7 +381,7 @@ function refreshRate() {
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--model', 'haiku',
     '--tools', '', '--strict-mcp-config', '--disable-slash-commands', '--setting-sources', '', '--system-prompt', 'Reply with a single period.'];
   ratePending = new Promise((resolve, reject) => {
-    const p = spawn(CLAUDE_BIN, args, { cwd: os.homedir(), env: cleanEnv(), windowsHide: true });
+    const p = spawn(CLAUDE_BIN, CLAUDE.pre.concat(args), { cwd: os.homedir(), env: cleanEnv(), windowsHide: true });
     let buf = '', got = null, err = '';
     const timer = setTimeout(() => killTree(p.pid), 60000);
     p.stdout.setEncoding('utf8'); p.stderr.setEncoding('utf8');
@@ -432,7 +466,7 @@ async function sendMessage(id, text, images) {
   if (effort) args.push('--effort', effort);
   args.push('--permission-mode', permissionMode);
   log('spawn', r.cwd, args.join(' '));
-  const proc = spawn(CLAUDE_BIN, args, { cwd: r.cwd, env: cleanEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const proc = spawn(CLAUDE_BIN, CLAUDE.pre.concat(args), { cwd: r.cwd, env: cleanEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   // turnActive: a turn is in progress (what the UI shows as "running"). The process can outlive a turn while
   // background tasks (run_in_background, Monitor…) keep going; bgTasks mirrors claude's own list of them.
   run = { id, proc, live: [liveMsg], partial: '', perms: new Map(), written: 1, consumed: 0, pending: [liveMsg.uuid], startOffset, file: exists ? fp : null,
@@ -464,7 +498,7 @@ const CMD_HIDE = new Set(['color', 'focus', 'heapdump', 'fast', 'agents', 'extra
 const cmdCache = new Map(); // lower-cased cwd -> { at, list } | { pending }
 function probeCommands(cwd) {
   return new Promise(resolve => {
-    const p = spawn(CLAUDE_BIN, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { cwd, env: cleanEnv(), windowsHide: true });
+    const p = spawn(CLAUDE_BIN, CLAUDE.pre.concat(['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']), { cwd, env: cleanEnv(), windowsHide: true });
     let buf = '', done = false;
     const end = list => { if (done) return; done = true; clearTimeout(timer); try { p.kill(); } catch {} resolve(list); };
     const timer = setTimeout(() => end(null), 30000);
@@ -527,7 +561,7 @@ async function runSide(b) {
   }
   log('side', b.kind, cwd, args.join(' '));
   return new Promise(resolve => {
-    const p = spawn(CLAUDE_BIN, args, { cwd, env: cleanEnv(), windowsHide: true });
+    const p = spawn(CLAUDE_BIN, CLAUDE.pre.concat(args), { cwd, env: cleanEnv(), windowsHide: true });
     let out = '', err = '';
     const timer = setTimeout(() => { err += '\n逾時，已中止'; killTree(p.pid); }, timeoutMs);
     p.stdout.setEncoding('utf8'); p.stderr.setEncoding('utf8');
@@ -870,7 +904,7 @@ let authInfo = null, authAt = 0, authPending = null;
 function refreshAuth() {
   if (authPending) return authPending;
   authPending = new Promise(resolve => {
-    execFile(CLAUDE_BIN, ['auth', 'status'], { env: cleanEnv(), windowsHide: true, encoding: 'utf8', timeout: 20000 }, (err, out) => {
+    execFile(CLAUDE_BIN, CLAUDE.pre.concat(['auth', 'status']), { env: cleanEnv(), windowsHide: true, encoding: 'utf8', timeout: 20000 }, (err, out) => {
       const prev = authInfo && authInfo.loggedIn;
       try { authInfo = JSON.parse(out); } catch { authInfo = { loggedIn: false, error: (err && err.message) || 'unknown' }; }
       authAt = Date.now(); authPending = null;
@@ -1174,6 +1208,7 @@ server.on('error', async e => {
 server.listen(PORT, '127.0.0.1', () => {
   try { fs.writeFileSync(LOG_FILE, ''); } catch {}
   log(`CLI Controller v${APP_VERSION} listening on http://127.0.0.1:${PORT}/?t=${TOKEN}`);
+  log('claude:', [CLAUDE_BIN, ...CLAUDE.pre].join(' '));
   lastClientSeen = Date.now();
   if (!NO_OPEN) openWindow();
   refreshAuth();
