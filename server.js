@@ -52,7 +52,7 @@ try { store = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8')); } catch {}
 store.sessions = store.sessions || {};
 store.prompts = Array.isArray(store.prompts) ? store.prompts : [];
 store.ctxWindows = store.ctxWindows || {}; // model id -> context window size, as reported by claude (result.modelUsage)
-store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '', windowTheme: 'system', folderGroups: [], folderOrder: [], sessionOrder: {} }, store.prefs);
+store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '', windowTheme: 'system', folderGroups: [], folderOrder: [], sessionOrder: {}, workspaces: {} }, store.prefs);
 let saveTimer = null;
 function flushStore() {
   clearTimeout(saveTimer); saveTimer = null;
@@ -1019,6 +1019,24 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       for (const k of ['model', 'effort', 'permissionMode', 'groupBy', 'lastCwd']) if (k in b) store.prefs[k] = b[k];
       if (['system', 'light', 'dark'].includes(b.windowTheme)) store.prefs.windowTheme = b.windowTheme;
+      if (b.workspaces && typeof b.workspaces === 'object' && !Array.isArray(b.workspaces)) { // 專注模式：每個資料夾一份工作區（工作群／排序／收合／捷徑／視窗）
+        const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : null), arr = (v, n, f) => (Array.isArray(v) ? v.slice(0, n).map(f).filter(x => x != null) : []);
+        const out = {};
+        for (const [k, w] of Object.entries(b.workspaces).slice(0, 200)) {
+          if (!w || typeof w !== 'object') continue;
+          out[k.slice(0, 400)] = {
+            groups: arr(w.groups, 100, g => (g && typeof g.id === 'string' && typeof g.name === 'string')
+              ? { id: g.id.slice(0, 40), name: g.name.slice(0, 60), color: str(g.color, 20) || '', sessions: arr(g.sessions, 1000, i => str(i, 80)) } : null),
+            order: arr(w.order, 2000, i => str(i, 100)), collapsed: arr(w.collapsed, 300, i => str(i, 100)),
+            short: { main: str(w.short && w.short.main, 80), sub: str(w.short && w.short.sub, 80) },
+            vcards: (() => { const v = {}; // 每個工作群最多一張「還沒說過話」的虛擬空白卡片（只存在工作區，不是伺服器的 session）
+              if (w.vcards && typeof w.vcards === 'object') for (const [gid, c] of Object.entries(w.vcards).slice(0, 100)) if (c && typeof c.vid === 'string') v[gid.slice(0, 40)] = { vid: c.vid.slice(0, 40), name: str(c.name, 200) };
+              return v; })(),
+            panes: w.panes && typeof w.panes === 'object' ? { L: str(w.panes.L, 80), R: str(w.panes.R, 80), split: !!w.panes.split } : null,
+          };
+        }
+        store.prefs.workspaces = out;
+      }
       if (Array.isArray(b.folderOrder)) store.prefs.folderOrder = b.folderOrder.filter(k => typeof k === 'string').slice(0, 1000).map(k => k.slice(0, 400));
       if (b.sessionOrder && typeof b.sessionOrder === 'object' && !Array.isArray(b.sessionOrder)) { // 資料夾 → 手動排的對話 id 順序
         const so = {};

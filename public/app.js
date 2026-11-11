@@ -66,7 +66,7 @@ const inActive = fn => withPane(ACTIVE, fn);
 const pst = p => (p === CTX ? S : p.st);
 const panesOn = () => (PANE.R.el.hidden ? [PANE.L] : [PANE.L, PANE.R]);
 const paneShows = (p, sid) => !pst(p).draft && pst(p).cur === sid;
-const shownIds = () => new Set(panesOn().filter(p => !pst(p).draft && pst(p).cur).map(p => pst(p).cur));
+const shownIds = () => new Set(panesOn().map(p => { const st = pst(p); return st.draft ? (st.draft.vid || null) : st.cur; }).filter(Boolean));
 const panesShowing = sid => panesOn().filter(p => paneShows(p, sid));
 
 // ---------- helpers ----------
@@ -103,6 +103,7 @@ function visibleSessions() {
   const q = $('#search').value.trim().toLowerCase();
   const showScratch = S.showScratch, showHidden = S.showHidden, src = S.source, shown = shownIds();
   return S.sessions.filter(s => (showHidden || !s.hidden || shown.has(s.id)) && (showScratch || !s.scratch || shown.has(s.id)) &&
+    (!S.focusKey || folderKey(s.cwd) === S.focusKey) &&
     (src === 'all' || s.source === src || shown.has(s.id)) &&
     (!q || (s.title + ' ' + s.cwd + ' ' + (s.lastPrompt || '')).toLowerCase().includes(q)));
 }
@@ -112,6 +113,11 @@ function renderSidebar() {
   if (S.dnd) { S.dndPending = true; return; } // 拖曳中不重畫（會把被拖的節點換掉）；放開後再畫
   const list = $('#sessionList'); list.innerHTML = '';
   const ss = visibleSessions();
+  if (S.focusKey) { // 專注模式（工作區副本）
+    renderFocusSidebar(list, ss);
+    const ri0 = list.querySelector('.renameIn'); if (ri0) { ri0.focus(); const n = ri0.value.length; try { ri0.setSelectionRange(n, n); } catch {} }
+    return;
+  }
   const pinned = ss.filter(s => s.pinned), rest = ss.filter(s => !s.pinned);
   if (pinned.length) list.append(group('pinned', '📌 釘選', null, pinned));
   if (S.prefs.groupBy === 'flat') { // plain list, newest first, with the folder name under each title
@@ -194,6 +200,28 @@ function dropPos(e, node, allowInto) {
   return y < 0.5 ? 'before' : 'after';
 }
 function planDrop(src, tgt, e, node) {
+  if (src.type === 'wsession') { // 專注模式：工作群
+    if (src.virtual) return tgt.type === 'wsession' && tgt.gid === src.gid && tgt.sid !== src.sid ? { act: 'winto', sid: src.sid, gid: src.gid, tsid: tgt.sid, pos: dropPos(e, node) } : null; // 空白卡片只能在自己的群裡換位置
+    if (tgt.type === 'wsession') {
+      if (tgt.sid === src.sid) return null;
+      if (tgt.gid) return { act: 'winto', sid: src.sid, gid: tgt.gid, tsid: tgt.sid, pos: dropPos(e, node) };
+      return { act: 'wtop', skey: 'ws:' + src.sid, tkey: 'ws:' + tgt.sid, pos: dropPos(e, node), ungroup: src.sid };
+    }
+    if (tgt.type === 'wgroup') {
+      const pos = dropPos(e, node, true);
+      if (pos === 'into') return { act: 'winto', sid: src.sid, gid: tgt.key, pos: 'into' };
+      return { act: 'wtop', skey: 'ws:' + src.sid, tkey: 'wg:' + tgt.key, pos, ungroup: src.sid };
+    }
+    return null;
+  }
+  if (src.type === 'wgroup') {
+    if (tgt.type === 'wgroup') return tgt.key === src.key ? null : { act: 'wtop', skey: 'wg:' + src.key, tkey: 'wg:' + tgt.key, pos: dropPos(e, node) };
+    if (tgt.type === 'wsession') {
+      const tkey = tgt.gid ? 'wg:' + tgt.gid : 'ws:' + tgt.sid;
+      return tkey === 'wg:' + src.key ? null : { act: 'wtop', skey: 'wg:' + src.key, tkey, pos: dropPos(e, node) };
+    }
+    return null;
+  }
   if (src.type === 'session') {
     if (tgt.type !== 'session' || tgt.fk !== src.fk || tgt.sid === src.sid) return null;
     return { act: 'sessions', fk: src.fk, sid: src.sid, tsid: tgt.sid, pos: dropPos(e, node) };
@@ -218,6 +246,21 @@ function planDrop(src, tgt, e, node) {
   return null;
 }
 function execDrop(p) {
+  if (p.act === 'wtop' || p.act === 'winto') { // 專注模式：工作群的拖曳
+    const ws = wsGet(), keys = wsKeys();
+    if (p.act === 'wtop') {
+      const ks = keys.filter(k => k !== p.skey);
+      let i = ks.indexOf(p.tkey); if (i < 0) i = ks.length; if (p.pos === 'after') i++;
+      ks.splice(i, 0, p.skey); ws.order = ks;
+      if (p.ungroup) ws.groups.forEach(g => { g.sessions = g.sessions.filter(x => x !== p.ungroup); });
+    } else {
+      ws.groups.forEach(g => { g.sessions = g.sessions.filter(x => x !== p.sid); });
+      const g = ws.groups.find(x => x.id === p.gid); if (!g) return;
+      let i = p.pos === 'into' ? g.sessions.length : g.sessions.indexOf(p.tsid); if (i < 0) i = g.sessions.length; else if (p.pos === 'after') i++;
+      g.sessions.splice(i, 0, p.sid); ws.order = keys.filter(k => k !== 'ws:' + p.sid);
+    }
+    wsSave(); return;
+  }
   const body = {};
   if (p.act === 'sessions') {
     const items = orderSessions(p.fk, visibleSessions().filter(s => !s.pinned && folderKey(s.cwd) === p.fk));
@@ -260,9 +303,247 @@ function newFolderGroup(key) {
 function moveFolderToGroup(key, gid) { // gid = null → 移出群組
   saveFolderGroups(folderGroups().map(g => ({ ...g, folders: g.id === gid ? [...g.folders.filter(k => k !== key), key] : g.folders.filter(k => k !== key) })));
 }
+// ---- 專注模式：把一個資料夾做成「獨立工作區副本」----
+// 進入後：只剩這個資料夾；資料夾卡片只能退出；不能開這個資料夾以外的對話；對話可以多組一層「工作群」。
+// 每個資料夾各有一份自己的狀態（工作群、排序、收合、主／副捷徑卡、開著的視窗）存在伺服器，下次進入還原；退出就是原本的樣子。
+try { const f = JSON.parse(ls('cc_focus') || 'null'); S.focusKey = (f && f.key) || null; S.focusCwd = (f && f.cwd) || ''; S.focusSaved = (f && f.saved) || null; } catch { S.focusKey = null; S.focusCwd = ''; S.focusSaved = null; }
+function persistFocus() { ls('cc_focus', S.focusKey ? JSON.stringify({ key: S.focusKey, cwd: S.focusCwd, saved: S.focusSaved }) : ''); }
+const paneSid = p => (!pst(p).draft && pst(p).cur) || null;
+const paneIds = () => ({ L: paneSid(PANE.L), R: PANE.R.el.hidden ? null : paneSid(PANE.R), split: !PANE.R.el.hidden });
+const sessionExists = id => !!id && S.sessions.some(s => s.id === id);
+const inFocusFolder = id => { const s = S.sessions.find(x => x.id === id); return !!s && folderKey(s.cwd) === S.focusKey; };
+function wsAll() { return (S.prefs.workspaces ||= {}); }
+function wsGet() {
+  const w = (wsAll()[S.focusKey] ||= { groups: [], order: [], collapsed: [], short: { main: null, sub: null }, panes: null });
+  w.vcards ||= {}; // 虛擬空白卡片（每個工作群最多一張）
+  return w;
+}
+function wsSave() { api('POST', '/api/prefs', { workspaces: wsAll() }).catch(e => toast('儲存專注工作區失敗: ' + e.message)); renderSidebar(); }
+// 專注工作區的結構：頂層＝工作群＋沒進群的對話（同一位階，可混排）；新出現的對話放最前面、其餘照手動順序
+function wsStructure() {
+  const ws = wsGet(), sess = visibleSessions(), byId = new Map(sess.map(s => [s.id, s])), inGroup = new Set();
+  const groups = ws.groups.map(g => { const items = g.sessions.map(id => byId.get(id) || wsVStub(ws, id)).filter(Boolean); items.forEach(s => inGroup.add(s.id)); return { g, items }; });
+  const units = [...groups.map(x => ({ key: 'wg:' + x.g.id, group: x })), ...sess.filter(s => !inGroup.has(s.id)).map(s => ({ key: 'ws:' + s.id, s }))];
+  units.forEach((u, i) => { const o = ws.order.indexOf(u.key); u.rank = o >= 0 ? o : -1e6 + i; });
+  units.sort((a, b) => a.rank - b.rank);
+  S.wsKeys = units.map(u => u.key);
+  return units;
+}
+const wsKeys = () => { wsStructure(); return S.wsKeys.slice(); };
+function wsNewGroup(sid) {
+  const name = prompt('新工作群的名稱', ''); if (name == null || !name.trim()) return;
+  const ws = wsGet(), all = wsKeys(); let i = all.indexOf('ws:' + sid); if (i < 0) i = 0;
+  const keys = all.filter(k => k !== 'ws:' + sid);
+  ws.groups.forEach(g => { g.sessions = g.sessions.filter(x => x !== sid); });
+  const g = { id: 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name: name.trim(), color: FG_COLORS[ws.groups.length % FG_COLORS.length], sessions: [sid] };
+  ws.groups.push(g); keys.splice(i, 0, 'wg:' + g.id); ws.order = keys; wsSave();
+}
+function wsMoveToGroup(sid, gid) { // gid = null → 移出群
+  const ws = wsGet(), keys = wsKeys().filter(k => k !== 'ws:' + sid);
+  ws.groups.forEach(g => { g.sessions = g.sessions.filter(x => x !== sid); });
+  if (gid) ws.groups.find(g => g.id === gid).sessions.push(sid); else keys.unshift('ws:' + sid);
+  ws.order = keys; wsSave();
+}
+function wsMenuItems(s) {
+  const ws = wsGet(), cur = ws.groups.find(g => g.sessions.includes(s.id));
+  const items = [['＋ 新增工作群…', () => wsNewGroup(s.id)]];
+  for (const g of ws.groups) if (!cur || g.id !== cur.id) items.push([`➜ 移到工作群「${g.name}」`, () => wsMoveToGroup(s.id, g.id)]);
+  if (cur) items.push([`✕ 從「${cur.name}」移出`, () => wsMoveToGroup(s.id, null)]);
+  return items;
+}
+function wgroupMenu(g, x, y) {
+  showMenu(x, y, [
+    ['＋ 在這個工作群新增對話', () => wsAddSession(g.id)],
+    ['✎ 重新命名工作群', () => { const n = prompt('工作群名稱', g.name); if (n != null && n.trim()) { g.name = n.trim(); wsSave(); } }],
+    ['🎨 換顏色', () => { g.color = FG_COLORS[(FG_COLORS.indexOf(g.color) + 1) % FG_COLORS.length]; wsSave(); }],
+    ['解散工作群（對話回到外面）', () => {
+      const ws = wsGet(), vc = ws.vcards[g.id]; if (vc) wsDropVirtual(vc.vid, false); // 沒說過話的空白卡片直接丟掉
+      const keys = wsKeys(), i = keys.indexOf('wg:' + g.id), ids = g.sessions.filter(id => !vc || id !== vc.vid);
+      ws.groups = ws.groups.filter(x => x.id !== g.id);
+      keys.splice(i < 0 ? 0 : i, 1, ...ids.map(id => 'ws:' + id)); ws.order = keys; wsSave();
+    }, 'danger'],
+  ]);
+}
+const wsToggle = key => { const ws = wsGet(), i = ws.collapsed.indexOf(key); if (i >= 0) ws.collapsed.splice(i, 1); else ws.collapsed.push(key); wsSave(); };
+// ---- 工作群的「虛擬空白卡片」：還沒說過話的新對話，只存在工作區資料裡（不是伺服器的 session）----
+// 新增時必須先取名字（沒取名字＝不建立）；取了名字就暫時保留，直到說第一句話（才登記成真正的 session，原位置替換、名字沿用）或手動刪除。
+// 每個工作群同時最多一張：這張還沒說過話之前不能再新增。
+const shownVids = () => new Set(panesOn().map(p => pst(p).draft && pst(p).draft.vid).filter(Boolean));
+function wsVStub(ws, vid) {
+  for (const [gid, vc] of Object.entries(ws.vcards)) if (vc.vid === vid) return { id: vid, virtual: true, gid, title: '', cwd: S.focusCwd, updatedAt: 0 };
+  return null;
+}
+function dispTitle(s) {
+  if (!S.focusKey) return s.title;
+  const ws = wsGet();
+  if (s.virtual) { const vc = ws.vcards[s.gid], g = ws.groups.find(x => x.id === s.gid); return (vc && vc.name) || ((g ? g.name : '') + '：（新對話）'); }
+  return s.title;
+}
+function wsOpenVirtual(vid) {
+  const shown = panesOn().find(p => pst(p).draft && pst(p).draft.vid === vid);
+  if (shown) { setActive(shown); return; }
+  if (ACTIVE !== PANE.L) setActive(PANE.L);
+  withPane(PANE.L, () => { newDraft(S.focusCwd); S.draft = { vid }; });
+  renderSidebar();
+}
+function wsAddSession(gid) {
+  const ws = wsGet(), g = ws.groups.find(x => x.id === gid); if (!g) return;
+  const ex = ws.vcards[gid];
+  if (ex) { // 一個工作群只允許一張：已經有就跳過去
+    ws.collapsed = ws.collapsed.filter(k => k !== 'wg:' + gid); wsSave();
+    toast('這個工作群已經有一張還沒開始的新對話，已跳到那張'); wsOpenVirtual(ex.vid); return;
+  }
+  const vid = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  ws.vcards[gid] = { vid, name: null }; g.sessions.push(vid); // name 還是空的＝等著命名；命名前不算數
+  ws.collapsed = ws.collapsed.filter(k => k !== 'wg:' + gid);
+  wsSave(); wsOpenVirtual(vid);
+  const def = g.name + '：';
+  if (S.sbCollapsed) { // 橫向分頁列沒有就地輸入框：用輸入視窗（一定要取名字；取消＝放棄這張卡片）
+    let t; for (;;) { t = prompt('新對話的名稱（必填；取消＝放棄）', def); if (t == null) break; t = t.trim(); if (t && t !== def) break; toast('新增對話需要先取名字'); }
+    wsVRenameDone({ id: vid, gid, virtual: true }, t == null ? null : t, def, true);
+  } else { // 像 Windows 新增資料夾：先進入重新命名，預設「工作群名：」，游標在後面
+    S.vrCreating = vid; S.renaming = vid; S.renameText = def; S.renameInit = def; renderSidebar();
+  }
+}
+function wsVRenameDone(s, t, init, creating, viaBlur) {
+  const ws = wsGet(), vc = ws.vcards[s.gid]; S.vrCreating = null;
+  if (!vc || vc.vid !== s.id) { renderSidebar(); return; }
+  if (t === null) { if (creating) wsDropVirtual(s.id); else renderSidebar(); return; } // Esc：新建的直接放棄
+  const before = init != null ? init : S.renameInit;
+  if (t && t !== before) { vc.name = t; wsSave(); return; } // 取了名字：暫時保留
+  if (creating) { // 新增時一定要改名：只按 Enter／沒改內容不算；點別處離開＝放棄，Enter＝留在輸入框提醒
+    if (viaBlur) { wsDropVirtual(s.id); return; }
+    toast('新增對話需要先取名字（Esc 放棄）');
+    S.vrCreating = s.id; S.renaming = s.id; S.renameText = before; S.renameInit = before; renderSidebar(); return;
+  }
+  renderSidebar();
+}
+function wsDropVirtual(vid, resetPane = true) {
+  const ws = wsGet();
+  for (const [gid, vc] of Object.entries(ws.vcards)) if (vc.vid === vid) delete ws.vcards[gid];
+  ws.groups.forEach(g => { g.sessions = g.sessions.filter(x => x !== vid); });
+  ws.order = ws.order.filter(k => k !== 'ws:' + vid);
+  if (resetPane) for (const p of panesOn()) if (pst(p).draft && pst(p).draft.vid === vid) withPane(p, () => newDraft(S.focusCwd));
+  wsSave();
+}
+function wsSweepVirtual() { // 清掉「還沒取名字」的半成品卡片（命名中途退出／重整／當機留下的）；取過名字的一律保留
+  if (!S.focusKey) return;
+  const ws = wsGet();
+  for (const vc of Object.values(ws.vcards).slice()) if (!vc.name) wsDropVirtual(vc.vid, true);
+}
+function wsPromote(vid, sid) { // 第一句話送出：虛擬卡片變成真正的 session（原位置替換）
+  for (const ws of Object.values(wsAll())) {
+    if (!ws.vcards) continue;
+    for (const [gid, vc] of Object.entries(ws.vcards)) {
+      if (vc.vid !== vid) continue;
+      const g = ws.groups.find(x => x.id === gid);
+      if (g) g.sessions = g.sessions.map(x => (x === vid ? sid : x));
+      delete ws.vcards[gid];
+      if (vc.name) patch(sid, { title: vc.name }); // 沿用使用者取的名字
+    }
+  }
+  api('POST', '/api/prefs', { workspaces: wsAll() }).catch(() => {}); renderSidebar();
+}
+function wsSweepAllStored() { // 重開 app：每個工作區「還沒取名字」的半成品卡片清一次（當機／直接關閉時留下的）
+  let ch = false;
+  for (const ws of Object.values(wsAll())) {
+    if (!ws.vcards) continue;
+    for (const [gid, vc] of Object.entries(ws.vcards)) if (!vc.name) {
+      delete ws.vcards[gid]; ch = true;
+      (ws.groups || []).forEach(g => { g.sessions = g.sessions.filter(x => x !== vc.vid); });
+    }
+  }
+  if (ch) { api('POST', '/api/prefs', { workspaces: wsAll() }).catch(() => {}); renderSidebar(); }
+}
+function vitem(s) { // 側欄：虛擬空白卡片
+  const d = el('div', { class: 'sitem blankcard' + (shownIds().has(s.id) ? ' active' : ''), title: '還沒說過話的新對話（點一下開始；第一句話送出才會變成正式對話）' },
+    el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, S.renaming === s.id ? renameInput(s) : dispTitle(s))),
+    el('span', { class: 'blanktag' }, '未開始'));
+  d.onclick = () => { if (S.renaming === s.id) return; wsOpenVirtual(s.id); };
+  d.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, vMenuItems(s)); };
+  if (S.renaming !== s.id) dndWire(d, { type: 'wsession', sid: s.id, gid: s.gid, virtual: true });
+  return d;
+}
+function vMenuItems(s) { // 虛擬卡片的右鍵：只有改名和刪除
+  return [
+    ['✎ 重新命名', () => {
+      if (S.sbCollapsed) { const t = prompt('卡片名稱', dispTitle(s)); if (t != null) wsVRenameDone(s, t.trim(), dispTitle(s), false); return; }
+      S.renaming = s.id; S.renameText = dispTitle(s); S.renameInit = dispTitle(s); renderSidebar();
+    }],
+    ['🗑 刪除這張空白卡片', () => wsDropVirtual(s.id), 'danger'],
+  ];
+}
+function enterFocus(cwd) {
+  if (S.focusKey) return;
+  S.focusSaved = paneIds();                      // 進入前開著的視窗，退出時還原
+  S.focusKey = folderKey(cwd); S.focusCwd = cwd; persistFocus();
+  const ws = wsGet(), want = ws.panes || {};
+  wsSweepVirtual(true); // 上次當機留下的、沒命名的空白卡片
+  renderSidebar();
+  // 還原這個工作區上次的視窗；沒有就沿用已經在這個資料夾裡的；其餘一律不能留在畫面上
+  const L = want.L && inFocusFolder(want.L) ? want.L : (S.focusSaved.L && inFocusFolder(S.focusSaved.L) ? S.focusSaved.L : null);
+  let R = want.split && want.R && inFocusFolder(want.R) ? want.R : (S.focusSaved.R && inFocusFolder(S.focusSaved.R) ? S.focusSaved.R : null);
+  if (R === L) R = null;
+  if (L) { if (!paneShows(PANE.L, L)) openSession(L, PANE.L); }
+  else if (!(pst(PANE.L).draft && folderKey(pst(PANE.L).cwd) === S.focusKey)) withPane(PANE.L, () => newDraft(cwd));
+  if (R) { if (!paneShows(PANE.R, R) || PANE.R.el.hidden) openRight(R); }
+  else if (!PANE.R.el.hidden) closeRight();
+  setActive(PANE.L);
+}
+function exitFocus() {
+  if (!S.focusKey) return;
+  wsSweepVirtual(true); // 退出時若還有「還沒取名字」的半成品卡片就清掉（取過名字的會保留）
+  wsGet().panes = paneIds();                      // 記住這個工作區的視窗，下次進入還原
+  const saved = S.focusSaved;
+  api('POST', '/api/prefs', { workspaces: wsAll() }).catch(() => {});
+  S.focusKey = null; S.focusCwd = ''; S.focusSaved = null; persistFocus();
+  renderSidebar();
+  if (saved) { // 還原進入前的視窗
+    if (sessionExists(saved.L) && !paneShows(PANE.L, saved.L)) openSession(saved.L, PANE.L);
+    if (saved.split && sessionExists(saved.R)) openRight(saved.R); else if (!saved.split && !PANE.R.el.hidden) closeRight();
+    setActive(PANE.L);
+  }
+}
+function focusBar() {
+  const name = baseName(S.focusCwd) || '(未知)';
+  return el('div', { class: 'focusBar', title: S.focusCwd },
+    el('span', { class: 'ft' }, '🎯 專注模式：' + name),
+    el('button', { class: 'btn small', title: '在這個資料夾開新對話', onclick: () => newDraft(S.focusCwd) }, '＋'),
+    el('button', { class: 'btn small', title: '退出專注模式（回到原本的列表）', onclick: () => exitFocus() }, '退出'));
+}
+// 專注中，左側列表的內容
+function renderFocusSidebar(list, ss) {
+  list.append(focusBar());
+  const head = el('div', { class: 'ghead fhx', title: S.focusCwd + '\n專注模式：資料夾卡片只能退出（右鍵）' },
+    el('span', { class: 'glabel' }, baseName(S.focusCwd) || '(未知)'), el('span', { class: 'gcount muted' }, ss.length));
+  head.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['⮌ 退出專注模式', () => exitFocus()]]); };
+  list.append(head);
+  const body = el('div', { class: 'fxbody' }), ws = wsGet();
+  const wsItem = (s, gid) => { if (s.virtual) return vitem(s); const n = item(s, false); if (S.renaming !== s.id) dndWire(n, { type: 'wsession', sid: s.id, gid: gid || null }); return n; };
+  for (const u of wsStructure()) {
+    if (u.s) { body.append(wsItem(u.s, null)); continue; }
+    const g = u.group.g, key = 'wg:' + g.id, collapsed = ws.collapsed.includes(key), color = g.color || '#8a8a8a';
+    const box = el('div', { class: 'fgroup' + (collapsed ? ' collapsed' : ''), style: '--fg:' + color });
+    const gh = el('div', { class: 'ghead fghead', title: '右鍵：重新命名／換顏色／解散工作群' },
+      el('span', { class: 'caret' }, collapsed ? '▸' : '▾'),
+      el('span', { class: 'glabel' }, el('span', { class: 'fgname', style: 'background:' + color + ';color:' + fgInk(color) }, g.name)),
+      el('span', { class: 'gcount muted' }, u.group.items.filter(x => !x.virtual).length)); // 空白卡片不計入數量
+    gh.onclick = () => wsToggle(key);
+    gh.oncontextmenu = e => { e.preventDefault(); wgroupMenu(g, e.clientX, e.clientY); };
+    dndWire(gh, { type: 'wgroup', key: g.id });
+    box.append(gh);
+    if (!collapsed) { const gb = el('div', { class: 'fgbody' }); u.group.items.forEach(s => gb.append(wsItem(s, g.id))); box.append(gb); }
+    body.append(box);
+  }
+  if (!ss.length) body.append(el('div', { class: 'empty muted' }, '這個資料夾目前沒有（符合條件的）對話，可以按上面的 ＋ 開新對話'));
+  list.append(body);
+}
 function folderMenu(cwd, x, y) {
   const key = folderKey(cwd), cur = groupOfFolder(key);
-  const items = [['＋ 新增資料夾群組…', () => newFolderGroup(key)]];
+  if (S.focusKey) { showMenu(x, y, [['⮌ 退出專注模式', () => exitFocus()]]); return; } // 專注中：資料夾卡片只能退出
+  const items = [];
+  if (cwd) items.push(['🎯 進入專注模式（只看這個資料夾）', () => enterFocus(cwd)]);
+  items.push(['＋ 新增資料夾群組…', () => newFolderGroup(key)]);
   for (const g of folderGroups()) if (!cur || g.id !== cur.id) items.push([`➜ 移到群組「${g.name}」`, () => moveFolderToGroup(key, g.id)]);
   if (cur) items.push([`✕ 從「${cur.name}」移出`, () => moveFolderToGroup(key, null)]);
   if (cwd) items.push(['📂 開啟資料夾', () => reveal(cwd)]);
@@ -325,7 +606,7 @@ function item(s, showFolder) {
   const run = S.running.has(s.id), wait = S.perms.get(s.id) && S.perms.get(s.id).size;
   const d = el('div', { class: 'sitem' + (shownIds().has(s.id) ? ' active' : '') + (s.hidden ? ' ishidden' : ''), title: `${s.title}\n${s.cwd}` },
     el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, S.source === 'all' && s.source === 'desktop' ? el('span', { class: 'srctag', title: '桌面版開的對話' }, '桌面') : null,
-        S.renaming === s.id ? renameInput(s) : s.title),
+        S.renaming === s.id ? renameInput(s) : dispTitle(s)),
       showFolder ? el('div', { class: 'sfolder muted' }, baseName(s.cwd)) : null),
     el('span', { class: 'stime muted' }, relTime(s.updatedAt)),
     // 右側狀態點（全部統一在右邊）：黃 = 有問題等你回答、橘閃 = 執行中、藍 = 跑完了還沒看（空位固定保留，標題不會頂到邊）
@@ -337,22 +618,23 @@ function item(s, showFolder) {
   return d;
 }
 function startRename(s) {
-  S.renaming = s.id; S.renameText = s.title; renderSidebar();
+  S.renaming = s.id; S.renameText = dispTitle(s); renderSidebar();
   const i = document.querySelector('#sessionList .renameIn'); if (i) { i.focus(); i.select(); }
 }
 function renameInput(s) {
   let done = false;
-  const finish = ok => {
+  const finish = (ok, viaBlur) => {
     if (done) return; done = true;
     const t = i.value.trim(); S.renaming = null;
-    if (ok && t !== s.title) patch(s.id, { title: t }); else renderSidebar();
+    if (s.virtual) { const creating = S.vrCreating === s.id; wsVRenameDone(s, ok ? t : null, null, creating, viaBlur); return; }
+    if (ok && t !== dispTitle(s)) patch(s.id, { title: t }); else renderSidebar();
   };
-  const i = el('input', { class: 'renameIn', type: 'text', value: S.renameText != null ? S.renameText : s.title, maxlength: '200', spellcheck: 'false' });
+  const i = el('input', { class: 'renameIn', type: 'text', value: S.renameText != null ? S.renameText : dispTitle(s), maxlength: '200', spellcheck: 'false' });
   i.oninput = () => { S.renameText = i.value; };
   i.onclick = e => e.stopPropagation();
   i.ondblclick = e => e.stopPropagation();
   i.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); finish(true); } else if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
-  i.onblur = () => finish(true);
+  i.onblur = () => finish(true, true);
   return i;
 }
 // click in the list: if the other pane already shows it, go there; otherwise open it in the active pane
@@ -360,6 +642,7 @@ function openHere(id) { openMain(id); } // 左鍵點對話＝在主視窗預覽�
 function sessionMenu(s, x, y) {
   const inR = paneShows(PANE.R, s.id) && !PANE.R.el.hidden;
   showMenu(x, y, [
+    ...(S.focusKey ? wsMenuItems(s) : []),
     ['✎ 重新命名', () => renameSession(s)],
     [inR ? '✕ 取消右側分割' : '⫽ 放到右側分割視窗', () => (inR ? closeRight() : openRight(s.id))],
     [s.pinned ? '取消釘選' : '📌 釘選', () => patch(s.id, { pinned: !s.pinned })],
@@ -398,7 +681,7 @@ document.addEventListener('click', e => { if (!e.target.closest('#menu')) hideMe
 document.addEventListener('keydown', e => { if (e.key === 'Escape') hideMenu(); });
 
 async function patch(id, body) { try { await api('PATCH', `/api/sessions/${id}`, body); await loadSessions(); } catch (e) { toast(e.message); } }
-function renameSession(s) { const t = prompt('對話名稱', s.title); if (t != null) patch(s.id, { title: t.trim() }); }
+function renameSession(s) { const t = prompt('對話名稱', dispTitle(s)); if (t != null) patch(s.id, { title: t.trim() }); }
 function reveal(p) { if (p) api('POST', '/api/reveal', { path: p }).catch(e => toast(e.message)); }
 async function loadSessions() {
   const d = await api('GET', '/api/sessions');
@@ -411,7 +694,7 @@ async function loadSessions() {
 function renderHeads() { for (const p of panesOn()) withPane(p, renderHead); }
 function renderHead() {
   const s = curSession(), h = CTX.hdr, draft = !!S.draft;
-  h.title.textContent = draft ? '新對話' : s ? s.title : '';
+  h.title.textContent = draft ? '新對話' : s ? dispTitle(s) : '';
   h.cwd.textContent = S.cwd ? S.cwd : '';
   h.cwd.hidden = !S.cwd;
   h.model.textContent = S.model ? '· ' + S.model : '';
@@ -548,9 +831,12 @@ async function send(override) {
   try {
     if (S.draft) {
       if (!S.cwd) { toast('請先選擇工作資料夾'); return; }
+      if (S.focusKey && folderKey(S.cwd) !== S.focusKey) { toast('專注模式中只能在這個資料夾作業（要換資料夾請先退出專注模式）'); return; }
       $('#btnSend').disabled = true;
+      const vid = pst(p).draft && pst(p).draft.vid; // 這是從工作群的虛擬空白卡片開出來的草稿
       const d = await api('POST', '/api/sessions', { cwd: S.cwd, ...cfgFromSelectors() });
       withPane(p, () => { S.draft = null; S.cur = d.id; S.cwd = d.cwd; S.msgs = []; renderTranscript(); });
+      if (vid) wsPromote(vid, d.id);
       ls('cc_last', d.id);
       await loadSessions();
     }
@@ -638,7 +924,7 @@ function renderQueueActive() {
 // new conversation in the pane that is loaded (the active one, unless called through withPane)
 function newDraft(cwd) {
   S.draft = { }; S.cur = null; S.msgs = []; S.model = ''; S.ctx = null;
-  S.cwd = cwd || S.prefs.lastCwd || '';
+  S.cwd = S.focusKey ? S.focusCwd : (cwd || S.prefs.lastCwd || ''); // 專注模式：新對話一律開在這個資料夾
   renderSidebar(); renderHead(); renderTranscript(); refreshComposer();
   if (CTX === ACTIVE) input.focus();
 }
@@ -665,6 +951,8 @@ function renderDraft() {
 // ---------- open session ----------
 // open a session in pane p (default: the active pane)
 async function openSession(id, p = ACTIVE) {
+
+  if (S.focusKey && !inFocusFolder(id)) { toast('專注模式中只能開啟這個資料夾的對話（要看別的請先退出專注模式）'); return; }
   withPane(p, () => {
     S.draft = null; S.cur = id; S.cwd = (curSession() || {}).cwd || ''; S.model = ''; S.ctx = null;
     if (p === ACTIVE) ls('cc_last', id);
@@ -1628,11 +1916,13 @@ S.tabsOn = ls('cc_tabs') === '1';
 // 左鍵點任何對話只是在主視窗「預覽」，不會變捷徑；要真的送出訊息才算（commitShortcut），直到被下一個取代。
 let SHORT = { main: null, sub: null };
 try { SHORT = Object.assign(SHORT, JSON.parse(ls('cc_sc') || '{}')); } catch {}
-function saveShort() { ls('cc_sc', JSON.stringify(SHORT)); }
+const shortObj = () => (S.focusKey ? wsGet().short : SHORT); // 專注模式有自己的一份主／副捷徑
+function saveShort() { if (S.focusKey) api('POST', '/api/prefs', { workspaces: wsAll() }).catch(() => {}); else ls('cc_sc', JSON.stringify(SHORT)); }
 function commitShortcut(p, id) {
   const k = p.key === 'R' ? 'sub' : 'main';
-  if (!id || SHORT[k] === id) return;
-  SHORT[k] = id; saveShort(); renderTabs();
+  const sh = shortObj();
+  if (!id || sh[k] === id) return;
+  sh[k] = id; saveShort(); renderTabs();
 }
 // 預覽：已經在某一格顯示就跳過去，否則一律開在主視窗（左）
 function openMain(id) {
@@ -1648,13 +1938,14 @@ function openSub(id) {
 }
 // 左側列表同款的結構資料（群組／資料夾的順序、群組成員、資料夾內對話的手動排序）
 function tabStructure() {
-  const vis = S.sessions.filter(s => (S.showHidden || !s.hidden) && (S.showScratch || !s.scratch) && (S.source === 'all' || s.source === S.source));
-  const pinned = vis.filter(s => s.pinned), rest = vis.filter(s => !s.pinned);
+  let vis = S.sessions.filter(s => (S.showHidden || !s.hidden) && (S.showScratch || !s.scratch) && (S.source === 'all' || s.source === S.source));
+  if (S.focusKey) vis = vis.filter(s => folderKey(s.cwd) === S.focusKey); // 專注模式
+  const pinned = S.focusKey ? [] : vis.filter(s => s.pinned), rest = S.focusKey ? vis : vis.filter(s => !s.pinned);
   const groups = new Map();
   for (const s of rest) { const k = folderKey(s.cwd); if (!groups.has(k)) groups.set(k, { cwd: s.cwd, items: [] }); groups.get(k).items.push(s); }
   for (const [k, g] of groups) g.items = orderSessions(k, g.items);
   const units = [], placed = new Set();
-  for (const fg of folderGroups()) {
+  for (const fg of S.focusKey ? [] : folderGroups()) {
     const inner = fg.folders.filter(k => groups.has(k)); inner.forEach(k => placed.add(k));
     units.push({ key: 'g:' + fg.id, fg, folders: inner.map(k => [k, groups.get(k)]) });
   }
@@ -1676,16 +1967,27 @@ function renderTabs() {
   const paneOf = new Map(panesOn().filter(p => !pst(p).draft && pst(p).cur).map(p => [pst(p).cur, p]));
   const flagOf = s => 'sflag' + (S.perms.get(s.id) && S.perms.get(s.id).size ? ' wait' : S.running.has(s.id) ? ' run' : UNREAD.has(s.id) ? ' unread' : '');
   const toggle = key => () => { S.collapsed.has(key) ? S.collapsed.delete(key) : S.collapsed.add(key); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
-  const sessionTab = (s, fk) => {
+  const virtualTab = s => { // 分頁列：虛擬空白卡片
+    const d = el('div', { class: 'tab vtab' + (shownIds().has(s.id) ? ' cur' : ''), title: '還沒說過話的新對話（點一下開始）' },
+      el('span', { class: 'ttl' }, dispTitle(s)), el('span', { class: 'blanktag' }, '未開始'));
+    d.onclick = () => wsOpenVirtual(s.id);
+    d.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, vMenuItems(s)); };
+    dndWire(d, { type: 'wsession', sid: s.id, gid: s.gid, virtual: true });
+    return d;
+  };
+  const sessionTab = (s, fk, gid) => {
+    if (s.virtual) return virtualTab(s);
     const p = paneOf.get(s.id);
     const d = el('div', { class: 'tab' + (p === ACTIVE ? ' cur' : p ? ' side' : ''), title: s.title + '\n' + s.cwd },
-      el('span', { class: 'ttl' }, s.title), el('span', { class: flagOf(s) }));
+      el('span', { class: 'ttl' }, dispTitle(s)), el('span', { class: flagOf(s) }));
     d.onclick = () => openMain(s.id);
     d.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [
+      ...(S.focusKey ? wsMenuItems(s) : []),
       ['⫽ 加入到分割畫面', () => (paneShows(PANE.R, s.id) && !PANE.R.el.hidden ? setActive(PANE.R) : openRight(s.id))],
       ['✎ 重新命名', () => renameSession(s)],
     ]); };
-    if (fk) dndWire(d, { type: 'session', sid: s.id, fk });
+    if (S.focusKey) dndWire(d, { type: 'wsession', sid: s.id, gid: gid || null });
+    else if (fk) dndWire(d, { type: 'session', sid: s.id, fk });
     return d;
   };
   const moreChip = (key, n) => { const m = el('div', { class: 'tmore', title: '展開其餘' }, '+' + n); m.onclick = () => { (S.expandedGroups ||= new Set()).add(key); renderSidebar(); }; return m; };
@@ -1723,20 +2025,41 @@ function renderTabs() {
   // 1) 左區（固定）：兩張捷徑虛擬卡片（沒有右鍵功能，只有左鍵跳回去）
   let anyV = false;
   for (const [kind, tag] of [['main', '主'], ['sub', '副']]) {
-    const s = byId.get(SHORT[kind]); if (!s) continue;
+    const s = byId.get(shortObj()[kind]); if (!s) continue;
     anyV = true;
     const p = paneOf.get(s.id);
     const d = el('div', { class: 'tab vcard' + (p === ACTIVE ? ' cur' : p ? ' side' : ''), title: (kind === 'main' ? '最新主視窗' : '最新副視窗') + '（點一下跳回去）\n' + s.title },
-      el('span', { class: 'vtag' }, tag), el('span', { class: 'ttl' }, s.title), el('span', { class: flagOf(s) }));
+      el('span', { class: 'vtag' }, tag), el('span', { class: 'ttl' }, dispTitle(s)), el('span', { class: flagOf(s) }));
     d.onclick = () => (kind === 'main' ? openMain(s.id) : openSub(s.id));
     d.oncontextmenu = e => e.preventDefault();
     left.append(d);
   }
   if (!anyV) left.append(el('div', { class: 'tshint', title: '在主／副視窗真的說話過的對話，會在這裡放一張捷徑卡，點一下跳回去' }, '主／副 捷徑'));
   // 2) 右區：Web 分頁式——還沒開始說話的新對話（草稿）
-  for (const p of panesOn()) if (pst(p).draft || !pst(p).cur) {
+  for (const p of panesOn()) if ((pst(p).draft && !pst(p).draft.vid) || !pst(p).cur && !pst(p).draft) {
     const d = el('div', { class: 'tab' + (p === ACTIVE ? ' cur' : ' side') }, el('span', { class: 'ttl' }, '＋ 新對話'));
     d.onclick = () => setActive(p); right.append(d);
+  }
+  if (S.focusKey) { // 專注模式：右區只剩這個資料夾（資料夾標籤只能退出）＋ 工作群／對話（同樣的分頁邏輯）
+    const ws = wsGet();
+    const fchip = el('div', { class: 'tchip tfchip', title: S.focusCwd + '\n專注模式：資料夾只能退出（右鍵）' },
+      el('span', { class: 'ttl' }, '🎯 ' + (baseName(S.focusCwd) || '(未知)')), el('span', { class: 'tcount' }, visibleSessions().length));
+    fchip.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['⮌ 退出專注模式', () => exitFocus()]]); };
+    right.append(fchip);
+    for (const u of wsStructure()) {
+      if (u.s) { right.append(sessionTab(u.s, null, null)); continue; }
+      const g = u.group.g, key = 'wg:' + g.id, collapsed = ws.collapsed.includes(key), color = g.color || '#8a8a8a';
+      const wrap = el('div', { class: 'tunit tg' + (collapsed ? ' collapsed' : ''), style: '--fg:' + color });
+      const chip = el('div', { class: 'tchip tgchip', title: '右鍵：重新命名／換顏色／解散工作群', style: 'background:' + color + ';color:' + fgInk(color) },
+        el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, g.name), el('span', { class: 'tcount' }, u.group.items.filter(x => !x.virtual).length));
+      chip.onclick = () => wsToggle(key);
+      chip.oncontextmenu = e => { e.preventDefault(); wgroupMenu(g, e.clientX, e.clientY); };
+      dndWire(chip, { type: 'wgroup', key: g.id }); chip.__block = wrap;
+      wrap.append(chip);
+      if (!collapsed) u.group.items.forEach(s => wrap.append(sessionTab(s, null, g.id)));
+      right.append(wrap);
+    }
+    return;
   }
   // 3) 釘選、群組、資料夾（同左側列表）
   if (st.pinned.length) {
@@ -2078,13 +2401,14 @@ function swapPanes() {
   PANE.L = R; PANE.R = L; R.key = 'L'; L.key = 'R'; R.el.dataset.pane = 'L'; L.el.dataset.pane = 'R';
   R.hdr.splitClose.hidden = true; R.hdr.swap.hidden = true; L.hdr.splitClose.hidden = false; L.hdr.swap.hidden = false;
   L.T.scrollTop = sL; R.T.scrollTop = sR;
-  [SHORT.main, SHORT.sub] = [SHORT.sub, SHORT.main]; saveShort();
+  { const sh = shortObj(); [sh.main, sh.sub] = [sh.sub, sh.main]; saveShort(); }
   updateFocusMarks(); renderTabs(); renderSidebar();
   if (typeof btwRepos === 'function') btwRepos();
   if (typeof ipRepos === 'function') ipRepos();
 }
 // 右側分割視窗: show a session in the right pane (replaces whatever was there; at most two panes)
 function openRight(sid) {
+  if (S.focusKey && !inFocusFolder(sid)) { toast('專注模式中只能開啟這個資料夾的對話'); return; }
   if (paneShows(PANE.L, sid)) { toast('這個對話已經在左側開著'); return; }
   const R = PANE.R;
   if (R.el.hidden) { R.el.hidden = false; updateSplit(); }
@@ -2124,7 +2448,11 @@ updateFocusMarks();
   loadPrompts();
   try { if (Notification.permission === 'default') Notification.requestPermission(); } catch {}
   const last = ls('cc_last');
-  if (last && S.sessions.some(s => s.id === last)) openSession(last); else newDraft();
+  wsSweepAllStored(); // 重開 app：把上次當機／直接關閉留下的空白卡片清掉
+  if (S.focusKey) { // 專注中重新整理：回到這個工作區上次的主視窗
+    const w = wsGet().panes, L = (last && inFocusFolder(last)) ? last : (w && w.L && inFocusFolder(w.L) ? w.L : null);
+    if (L) openSession(L); else newDraft(S.focusCwd);
+  } else if (last && S.sessions.some(s => s.id === last)) openSession(last); else newDraft();
   renderSidebar();
 })();
 

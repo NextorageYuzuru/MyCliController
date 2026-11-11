@@ -448,3 +448,16 @@ img.thumb { max-width: 260px; max-height: 180px; border-radius: 6px; border: 1px
 .vtag { font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 4px; background: var(--accent); color: #fff; flex-shrink: 0; }
 #tabBar .dz-before { box-shadow: inset 3px 0 0 var(--accent); }
 #tabBar .dz-after { box-shadow: inset -3px 0 0 var(--accent); }
+
+/* 專注模式 */
+.focusBar { display: flex; align-items: center; gap: 6px; margin: 2px 8px 8px; padding: 5px 6px 5px 10px; border-radius: 8px; background: color-mix(in srgb, var(--accent) 16%, var(--panel)); font-size: 12px; }
+.focusBar .ft { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.fhx { cursor: default; color: var(--text); background: color-mix(in srgb, var(--accent) 8%, transparent); margin: 0 4px 4px; }
+.fhx:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.fxbody { padding-left: 4px; }
+
+/* 工作群的虛擬空白卡片 */
+.blankcard { opacity: .78; } .blankcard .stitle { font-style: italic; }
+.blanktag { font-size: 10px; padding: 0 6px; border-radius: 4px; background: var(--panel2); color: var(--muted); flex-shrink: 0; font-style: normal; }
+.vtab { opacity: .85; font-style: italic; border-style: dashed; }
