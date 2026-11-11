@@ -52,7 +52,7 @@ try { store = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8')); } catch {}
 store.sessions = store.sessions || {};
 store.prompts = Array.isArray(store.prompts) ? store.prompts : [];
 store.ctxWindows = store.ctxWindows || {}; // model id -> context window size, as reported by claude (result.modelUsage)
-store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '', windowTheme: 'system', folderGroups: [], folderOrder: [], sessionOrder: {}, workspaces: {} }, store.prefs);
+store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '', windowTheme: 'system', folderGroups: [], folderOrder: [], sessionOrder: {}, workspaces: {}, folderColors: {} }, store.prefs);
 let saveTimer = null;
 function flushStore() {
   clearTimeout(saveTimer); saveTimer = null;
@@ -1019,6 +1019,11 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       for (const k of ['model', 'effort', 'permissionMode', 'groupBy', 'lastCwd']) if (k in b) store.prefs[k] = b[k];
       if (['system', 'light', 'dark'].includes(b.windowTheme)) store.prefs.windowTheme = b.windowTheme;
+      if (b.folderColors && typeof b.folderColors === 'object' && !Array.isArray(b.folderColors)) { // 資料夾（括弧）的顏色：小寫路徑 → 顏色
+        const fc = {};
+        for (const [k, v] of Object.entries(b.folderColors).slice(0, 500)) if (typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(v)) fc[k.slice(0, 400)] = v;
+        store.prefs.folderColors = fc;
+      }
       if (b.workspaces && typeof b.workspaces === 'object' && !Array.isArray(b.workspaces)) { // 專注模式：每個資料夾一份工作區（工作群／排序／收合／捷徑／視窗）
         const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : null), arr = (v, n, f) => (Array.isArray(v) ? v.slice(0, n).map(f).filter(x => x != null) : []);
         const out = {};

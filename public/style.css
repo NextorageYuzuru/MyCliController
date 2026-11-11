@@ -461,3 +461,18 @@ img.thumb { max-width: 260px; max-height: 180px; border-radius: 6px; border: 1px
 .blankcard { opacity: .78; } .blankcard .stitle { font-style: italic; }
 .blanktag { font-size: 10px; padding: 0 6px; border-radius: 4px; background: var(--panel2); color: var(--muted); flex-shrink: 0; font-style: normal; }
 .vtab { opacity: .85; font-style: italic; border-style: dashed; }
+
+
+/* 資料夾區塊括弧（┌─ 名稱 (N)）：上緣在資料夾名稱的高度右拐，往下直線到最後一張對話結束；顏色＝資料夾自己的顏色（--bk）；被點到的對話前面用同色的「>」 */
+.group.gbracket { --bk: var(--muted); position: relative; margin: 0 0 8px 3px; padding-left: 10px; }
+.group.gbracket::before { content: ''; position: absolute; left: 0; top: 12px; bottom: 2px; width: 9px; border-left: 2px solid var(--bk); border-top: 2px solid var(--bk); border-top-left-radius: 5px; pointer-events: none; }
+.group.gbracket > .ghead { height: 26px; padding: 0 6px 0 2px; color: var(--text); }
+.group.gbracket > .ghead .glabel { flex: 0 1 auto; }
+.group.gbracket > .ghead .gn { font-weight: 400; color: var(--muted); flex-shrink: 0; }
+.group.gbracket > .ghead .gadd { margin-left: auto; }
+.group.gbracket .sitem::before { content: ''; width: 9px; flex: none; margin-right: -4px; }
+.group.gbracket .sitem.active { box-shadow: none; }
+.group.gbracket .sitem.active::before { content: '>'; color: var(--bk); font-weight: 800; font-size: 14px; line-height: 1; text-align: left; }
+
+/* 沒展開的資料夾：只留名字高度那一小段線，不往下拐；展開後才有往下的範圍線 */
+.group.gbracket.collapsed::before { bottom: auto; height: 0; border-left: 0; border-radius: 0; }

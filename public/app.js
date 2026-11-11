@@ -139,6 +139,7 @@ function renderSidebar() {
     const groups = new Map();
     for (const s of rest) { const k = (s.cwd || '(未知)').toLowerCase(); if (!groups.has(k)) groups.set(k, { cwd: s.cwd, items: [] }); groups.get(k).items.push(s); }
     for (const [k, g] of groups) g.items = orderSessions(k, g.items);
+    ensureFolderColors([...groups.keys()]);
     // 使用者自訂的「資料夾群組」：把多個資料夾合成一區（群組 > 資料夾 > 對話）
     const placed = new Set(), q = $('#search').value.trim(), units = [];
     for (const fg of folderGroups()) {
@@ -288,6 +289,29 @@ function execDrop(p) {
 // ---- 資料夾群組（類似瀏覽器的分頁群組，但單位是整個資料夾）----
 const FG_COLORS = ['#4a90d9', '#e0a030', '#3fa66b', '#d9534f', '#9b59b6', '#e67e9a', '#3fb5b5', '#8a8a8a'];
 const folderGroups = () => (Array.isArray(S.prefs.folderGroups) ? S.prefs.folderGroups : []);
+// 每個資料夾自帶一個顏色（跟工作群同一組色盤；沒設過就依路徑自動配，固定不會變），右鍵可以換
+function folderColor(key) {
+  const set = (S.prefs.folderColors || {})[key]; if (set) return set;
+  let h = 0; for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return FG_COLORS[h % FG_COLORS.length];
+}
+// 還沒有顏色的資料夾：挑目前「用得最少」的顏色並記住（前 8 個一定各不相同，之後也盡量不重複；不是隨機、也不會每次重整換色）
+function ensureFolderColors(keys) {
+  const fc = S.prefs.folderColors || (S.prefs.folderColors = {}), use = new Map(FG_COLORS.map(c => [c, 0]));
+  for (const k of Object.keys(fc)) if (use.has(fc[k])) use.set(fc[k], use.get(fc[k]) + 1);
+  let changed = false;
+  for (const k of keys) {
+    if (fc[k]) continue;
+    let best = FG_COLORS[0]; for (const c of FG_COLORS) if (use.get(c) < use.get(best)) best = c;
+    fc[k] = best; use.set(best, use.get(best) + 1); changed = true;
+  }
+  if (changed) api('POST', '/api/prefs', { folderColors: fc }).catch(() => {});
+}
+function cycleFolderColor(key) {
+  const i = FG_COLORS.indexOf(folderColor(key)), next = FG_COLORS[(i + 1) % FG_COLORS.length];
+  S.prefs.folderColors = { ...(S.prefs.folderColors || {}), [key]: next }; renderSidebar();
+  api('POST', '/api/prefs', { folderColors: S.prefs.folderColors }).catch(e => toast('儲存顏色失敗: ' + e.message));
+}
 const folderKey = cwd => (cwd || '(未知)').toLowerCase();
 const groupOfFolder = key => folderGroups().find(g => g.folders.includes(key));
 function saveFolderGroups(arr) {
@@ -543,6 +567,7 @@ function folderMenu(cwd, x, y) {
   if (S.focusKey) { showMenu(x, y, [['⮌ 退出專注模式', () => exitFocus()]]); return; } // 專注中：資料夾卡片只能退出
   const items = [];
   if (cwd) items.push(['🎯 進入專注模式（只看這個資料夾）', () => enterFocus(cwd)]);
+  if (cwd && !cur) items.push(['🎨 換資料夾顏色', () => cycleFolderColor(key)]);
   items.push(['＋ 新增資料夾群組…', () => newFolderGroup(key)]);
   for (const g of folderGroups()) if (!cur || g.id !== cur.id) items.push([`➜ 移到群組「${g.name}」`, () => moveFolderToGroup(key, g.id)]);
   if (cur) items.push([`✕ 從「${cur.name}」移出`, () => moveFolderToGroup(key, null)]);
@@ -583,9 +608,12 @@ function userGroup(fg, folders) {
 }
 function group(key, label, cwd, items, showFolder, gid) {
   const collapsed = S.collapsed.has(key);
-  const g = el('div', { class: 'group' + (collapsed ? ' collapsed' : '') });
+  // 「依資料夾」排列下、沒進資料夾群組的資料夾：整塊（標題＋底下的對話）用 ┌ 括弧括起來，括弧／「>」用這個資料夾自己的顏色
+  const br = !!(cwd && !gid);
+  const g = el('div', { class: 'group' + (collapsed ? ' collapsed' : '') + (br ? ' gbracket' : ''), style: br ? '--bk:' + folderColor(folderKey(cwd)) : null });
   const head = el('div', { class: 'ghead', title: cwd || '' },
-    el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'glabel' }, label), el('span', { class: 'gcount muted' }, items.length));
+    ...(br ? [el('span', { class: 'glabel' }, label), el('span', { class: 'gn' }, '(' + items.length + ')')] // 括弧樣式：不要展開三角形，名稱後面直接 (N)
+           : [el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'glabel' }, label), el('span', { class: 'gcount muted' }, items.length)]));
   if (cwd) head.append(el('button', { class: 'gadd', title: '在此資料夾開新對話', onclick: e => { e.stopPropagation(); newDraft(cwd); } }, '＋'));
   head.onclick = () => { collapsed ? S.collapsed.delete(key) : S.collapsed.add(key); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
   if (cwd) head.oncontextmenu = e => { e.preventDefault(); folderMenu(cwd, e.clientX, e.clientY); }; // 資料夾卡片右鍵：資料夾群組
