@@ -1972,6 +1972,7 @@ function tabStructure() {
   const groups = new Map();
   for (const s of rest) { const k = folderKey(s.cwd); if (!groups.has(k)) groups.set(k, { cwd: s.cwd, items: [] }); groups.get(k).items.push(s); }
   for (const [k, g] of groups) g.items = orderSessions(k, g.items);
+  ensureFolderColors([...groups.keys()]);
   const units = [], placed = new Set();
   for (const fg of S.focusKey ? [] : folderGroups()) {
     const inner = fg.folders.filter(k => groups.has(k)); inner.forEach(k => placed.add(k));
@@ -2020,10 +2021,11 @@ function renderTabs() {
   };
   const moreChip = (key, n) => { const m = el('div', { class: 'tmore', title: '展開其餘' }, '+' + n); m.onclick = () => { (S.expandedGroups ||= new Set()).add(key); renderSidebar(); }; return m; };
   const folderUnit = ([k, g], gid) => {
-    const key = 'f:' + k, collapsed = S.collapsed.has(key);
-    const wrap = el('div', { class: 'tfold' + (collapsed ? ' collapsed' : '') });
-    const chip = el('div', { class: 'tchip tfchip', title: g.cwd + '\n右鍵：資料夾群組選單' },
-      el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, baseName(g.cwd) || '(未知)'), el('span', { class: 'tcount' }, g.items.length));
+    const key = 'f:' + k, collapsed = S.collapsed.has(key), br = !gid; // 沒進群組的資料夾：括弧樣式（橫向版）
+    const wrap = el('div', { class: 'tfold' + (collapsed ? ' collapsed' : '') + (br ? ' tbr' : ''), style: br ? '--bk:' + folderColor(k) : null });
+    const chip = el('div', { class: 'tchip ' + (br ? 'tfbr' : 'tfchip'), title: g.cwd + '\n右鍵：資料夾群組選單' },
+      ...(br ? [el('span', { class: 'ttl' }, baseName(g.cwd) || '(未知)'), el('span', { class: 'tn' }, '(' + g.items.length + ')')]
+             : [el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, baseName(g.cwd) || '(未知)'), el('span', { class: 'tcount' }, g.items.length)]));
     chip.onclick = toggle(key);
     chip.oncontextmenu = e => { e.preventDefault(); folderMenu(g.cwd, e.clientX, e.clientY); };
     dndWire(chip, { type: 'folder', key: k, gid: gid || null }); chip.__block = wrap;
@@ -2077,9 +2079,9 @@ function renderTabs() {
     for (const u of wsStructure()) {
       if (u.s) { right.append(sessionTab(u.s, null, null)); continue; }
       const g = u.group.g, key = 'wg:' + g.id, collapsed = ws.collapsed.includes(key), color = g.color || '#8a8a8a';
-      const wrap = el('div', { class: 'tunit tg' + (collapsed ? ' collapsed' : ''), style: '--fg:' + color });
-      const chip = el('div', { class: 'tchip tgchip', title: '右鍵：重新命名／換顏色／解散工作群', style: 'background:' + color + ';color:' + fgInk(color) },
-        el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, g.name), el('span', { class: 'tcount' }, u.group.items.filter(x => !x.virtual).length));
+      const wrap = el('div', { class: 'tfold tbr' + (collapsed ? ' collapsed' : ''), style: '--bk:' + color });
+      const chip = el('div', { class: 'tchip tfbr', title: '右鍵：新增對話／重新命名／換顏色／解散工作群' },
+        el('span', { class: 'ttl' }, g.name), el('span', { class: 'tn' }, '(' + u.group.items.filter(x => !x.virtual).length + ')'));
       chip.onclick = () => wsToggle(key);
       chip.oncontextmenu = e => { e.preventDefault(); wgroupMenu(g, e.clientX, e.clientY); };
       dndWire(chip, { type: 'wgroup', key: g.id }); chip.__block = wrap;

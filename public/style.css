@@ -482,3 +482,14 @@ img.thumb { max-width: 260px; max-height: 180px; border-radius: 6px; border: 1px
 .fxbody > .sitem::before { content: ''; width: 9px; flex: none; margin-right: -4px; }
 .fxbody > .sitem.active { box-shadow: none; }
 .fxbody > .sitem.active::before { content: '>'; color: color-mix(in srgb, var(--text) 50%, var(--bg)); font-weight: 800; font-size: 14px; line-height: 1; text-align: left; }
+
+/* 橫向分頁列的資料夾／工作群區塊（括弧轉 90 度）：展開＝上方一條資料夾顏色的橫線，蓋住它所有分頁那麼長，名稱旁一小段直立線；縮起＝只剩前面一條直立線（擋板） */
+.tfold.tbr { --bk: var(--muted); position: relative; border-top: 2px solid var(--bk); padding-left: 9px; margin-right: 8px; }
+.tfold.tbr::before { content: ''; position: absolute; left: 0; top: -2px; height: 24px; border-left: 2px solid var(--bk); border-top-left-radius: 5px; pointer-events: none; }
+.tfold.tbr.collapsed { border-top-color: transparent; }
+.tchip.tfbr { padding: 2px 6px 2px 2px; font-weight: 600; color: var(--text); background: none; }
+.tchip.tfbr .tn { font-weight: 400; font-size: 11px; color: var(--muted); }
+.tfold.tbr .tab.cur { box-shadow: none; }
+.tfold.tbr .tab.cur::before { content: '>'; color: var(--bk); font-weight: 800; flex: none; line-height: 1; }
+#tabScroll > .tab.cur { box-shadow: none; }
+#tabScroll > .tab.cur:not(.vtab)::before { content: '>'; color: color-mix(in srgb, var(--text) 50%, var(--bg)); font-weight: 800; flex: none; line-height: 1; }
