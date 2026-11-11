@@ -547,16 +547,16 @@ function renderFocusSidebar(list, ss) {
   for (const u of wsStructure()) {
     if (u.s) { body.append(wsItem(u.s, null)); continue; }
     const g = u.group.g, key = 'wg:' + g.id, collapsed = ws.collapsed.includes(key), color = g.color || '#8a8a8a';
-    const box = el('div', { class: 'fgroup' + (collapsed ? ' collapsed' : ''), style: '--fg:' + color });
-    const gh = el('div', { class: 'ghead fghead', title: '右鍵：重新命名／換顏色／解散工作群' },
-      el('span', { class: 'caret' }, collapsed ? '▸' : '▾'),
-      el('span', { class: 'glabel' }, el('span', { class: 'fgname', style: 'background:' + color + ';color:' + fgInk(color) }, g.name)),
-      el('span', { class: 'gcount muted' }, u.group.items.filter(x => !x.virtual).length)); // 空白卡片不計入數量
+    // 工作群的畫法＝跟「依資料夾」的資料夾區塊一樣：┌─ 名稱 (N)＋群組自己顏色的括弧，被點到的對話前面用同色的「>」
+    const box = el('div', { class: 'group gbracket' + (collapsed ? ' collapsed' : ''), style: '--bk:' + color });
+    const gh = el('div', { class: 'ghead', title: '右鍵：新增對話／重新命名／換顏色／解散工作群' },
+      el('span', { class: 'glabel' }, g.name),
+      el('span', { class: 'gn' }, '(' + u.group.items.filter(x => !x.virtual).length + ')')); // 空白卡片不計入數量
     gh.onclick = () => wsToggle(key);
     gh.oncontextmenu = e => { e.preventDefault(); wgroupMenu(g, e.clientX, e.clientY); };
     dndWire(gh, { type: 'wgroup', key: g.id });
     box.append(gh);
-    if (!collapsed) { const gb = el('div', { class: 'fgbody' }); u.group.items.forEach(s => gb.append(wsItem(s, g.id))); box.append(gb); }
+    if (!collapsed) u.group.items.forEach(s => box.append(wsItem(s, g.id)));
     body.append(box);
   }
   if (!ss.length) body.append(el('div', { class: 'empty muted' }, '這個資料夾目前沒有（符合條件的）對話，可以按上面的 ＋ 開新對話'));
@@ -726,7 +726,7 @@ function renderHead() {
   h.cwd.textContent = S.cwd ? S.cwd : '';
   h.cwd.hidden = !S.cwd;
   h.model.textContent = S.model ? '· ' + S.model : '';
-  if (CTX === ACTIVE) document.title = (s && !draft ? s.title + ' — ' : '') + 'CLI Controller';
+  // 視窗最上面那條（Windows 標題列／工作列）永遠顯示軟體名稱，不跟著切換對話變動（頁面 <title> 固定）
 }
 // context length: how much of the model's context window this session currently fills
 function fmtTok(n) {

@@ -476,3 +476,9 @@ img.thumb { max-width: 260px; max-height: 180px; border-radius: 6px; border: 1px
 
 /* 沒展開的資料夾：只留名字高度那一小段線，不往下拐；展開後才有往下的範圍線 */
 .group.gbracket.collapsed::before { bottom: auto; height: 0; border-left: 0; border-radius: 0; }
+
+/* 專注模式：沒放進任何工作群的對話，被點到時前面用灰色的預設「>」（位置保留，不會跳動） */
+.fxbody > .sitem { position: relative; }
+.fxbody > .sitem::before { content: ''; width: 9px; flex: none; margin-right: -4px; }
+.fxbody > .sitem.active { box-shadow: none; }
+.fxbody > .sitem.active::before { content: '>'; color: color-mix(in srgb, var(--text) 50%, var(--bg)); font-weight: 800; font-size: 14px; line-height: 1; text-align: left; }
