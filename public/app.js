@@ -339,7 +339,8 @@ const inFocusFolder = id => { const s = S.sessions.find(x => x.id === id); retur
 function wsAll() { return (S.prefs.workspaces ||= {}); }
 function wsGet() {
   const w = (wsAll()[S.focusKey] ||= { groups: [], order: [], collapsed: [], short: { main: null, sub: null }, panes: null });
-  w.vcards ||= {}; // 虛擬空白卡片（每個工作群最多一張）
+  w.vcards ||= {}; // 虛擬空白卡片：整個專注工作區同時最多一張（key＝所屬工作群 id）
+  for (const gid of Object.keys(w.vcards)) if (!w.groups.some(g => g.id === gid)) delete w.vcards[gid]; // 所屬工作群不存在了：清掉，避免「看不到卻擋住新增」
   return w;
 }
 function wsSave() { api('POST', '/api/prefs', { workspaces: wsAll() }).catch(e => toast('儲存專注工作區失敗: ' + e.message)); renderSidebar(); }
@@ -373,7 +374,29 @@ function wsMenuItems(s) {
   const items = [['＋ 新增工作群…', () => wsNewGroup(s.id)]];
   for (const g of ws.groups) if (!cur || g.id !== cur.id) items.push([`➜ 移到工作群「${g.name}」`, () => wsMoveToGroup(s.id, g.id)]);
   if (cur) items.push([`✕ 從「${cur.name}」移出`, () => wsMoveToGroup(s.id, null)]);
+  if (cur) items.push(['↻ 原地刷新（刪除並在原位開同名新對話）', () => wsRefreshSession(s)]); // 只有工作群裡的對話才有
   return items;
+}
+// 原地刷新（只在專注模式、只對工作群裡的對話）：刪掉這個對話，在同一個位置換成一張「同名的虛擬空白卡片」（地位同新增出來的空白卡片：
+// 不在伺服器建對話、不計入數量、第一句話才登記）。整個專注工作區同時只能有一張空白卡片，已經有就不能操作。
+async function wsRefreshSession(s) {
+  if (!S.focusKey || s.virtual) return;
+  const ws = wsGet(), grp = ws.groups.find(g => g.sessions.includes(s.id));
+  if (!grp) { toast('原地刷新只能用在工作群裡的對話'); return; }
+  if (Object.keys(ws.vcards).length) { toast('專注模式同時只能有一張空白卡片，先用掉或刪掉它才能原地刷新'); return; }
+  if (S.running.has(s.id)) { toast('這個對話正在執行，請先按停止再刷新'); return; }
+  if (!confirm(`原地刷新「${dispTitle(s)}」？\n\n這個對話會被刪除（紀錄移到 Windows 資源回收筒），並在同一個位置換成一張同名的空白卡片，第一句話送出才會變成新的對話。`)) return;
+  try { await api('DELETE', `/api/sessions/${s.id}`); } catch (e) { toast('刷新失敗: ' + e.message, 6000); return; }
+  const vid = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  ws.vcards[grp.id] = { vid, name: s.title };
+  grp.sessions = grp.sessions.map(x => (x === s.id ? vid : x)); // 同一個位置
+  if (ws.short.main === s.id) ws.short.main = null;
+  if (ws.short.sub === s.id) ws.short.sub = null;
+  UNREAD.delete(s.id); S.sessions = S.sessions.filter(x => x.id !== s.id);
+  let first = true;
+  for (const p of panesOn()) if (paneShows(p, s.id)) withPane(p, () => { newDraft(S.focusCwd); if (first) { S.draft = { vid }; first = false; } }); // 正在看它的視窗：換成這張空白卡片
+  wsSave(); loadSessions().catch(() => {});
+  toast('已刷新：原位置換成同名的空白卡片（舊對話在資源回收筒）');
 }
 function wgroupMenu(g, x, y) {
   showMenu(x, y, [
@@ -390,7 +413,8 @@ function wgroupMenu(g, x, y) {
 }
 const wsToggle = key => { const ws = wsGet(), i = ws.collapsed.indexOf(key); if (i >= 0) ws.collapsed.splice(i, 1); else ws.collapsed.push(key); wsSave(); };
 // ---- 工作群的「虛擬空白卡片」：還沒說過話的新對話，只存在工作區資料裡（不是伺服器的 session）----
-// 新增時必須先取名字（沒取名字＝不建立）；取了名字就暫時保留，直到說第一句話（才登記成真正的 session，原位置替換、名字沿用）或手動刪除。
+// 新增時必須先取名字（沒取名字＝不建立）；取了名字只是「暫時」保留，直到說第一句話（才登記成真正的 session，原位置替換、名字沿用）、手動刪除，
+// 或「進入／退出專注模式、重開 app」時被自動清掉（空白卡片不會留到下一次）。
 // 每個工作群同時最多一張：這張還沒說過話之前不能再新增。
 const shownVids = () => new Set(panesOn().map(p => pst(p).draft && pst(p).draft.vid).filter(Boolean));
 function wsVStub(ws, vid) {
@@ -412,10 +436,10 @@ function wsOpenVirtual(vid) {
 }
 function wsAddSession(gid) {
   const ws = wsGet(), g = ws.groups.find(x => x.id === gid); if (!g) return;
-  const ex = ws.vcards[gid];
-  if (ex) { // 一個工作群只允許一張：已經有就跳過去
-    ws.collapsed = ws.collapsed.filter(k => k !== 'wg:' + gid); wsSave();
-    toast('這個工作群已經有一張還沒開始的新對話，已跳到那張'); wsOpenVirtual(ex.vid); return;
+  const exGid = Object.keys(ws.vcards)[0], ex = exGid && ws.vcards[exGid];
+  if (ex) { // 整個專注工作區同時只允許一張空白卡片：已經有就跳過去
+    ws.collapsed = ws.collapsed.filter(k => k !== 'wg:' + exGid); wsSave();
+    toast('專注模式同時只能有一張還沒開始的空白卡片，已跳到那張'); wsOpenVirtual(ex.vid); return;
   }
   const vid = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   ws.vcards[gid] = { vid, name: null }; g.sessions.push(vid); // name 還是空的＝等著命名；命名前不算數
@@ -450,10 +474,10 @@ function wsDropVirtual(vid, resetPane = true) {
   if (resetPane) for (const p of panesOn()) if (pst(p).draft && pst(p).draft.vid === vid) withPane(p, () => newDraft(S.focusCwd));
   wsSave();
 }
-function wsSweepVirtual() { // 清掉「還沒取名字」的半成品卡片（命名中途退出／重整／當機留下的）；取過名字的一律保留
+function wsSweepVirtual() { // 空白卡片只是「暫時」的：進入／退出專注模式時一律先清掉（不論有沒有命名過）
   if (!S.focusKey) return;
   const ws = wsGet();
-  for (const vc of Object.values(ws.vcards).slice()) if (!vc.name) wsDropVirtual(vc.vid, true);
+  for (const vc of Object.values(ws.vcards).slice()) wsDropVirtual(vc.vid, true);
 }
 function wsPromote(vid, sid) { // 第一句話送出：虛擬卡片變成真正的 session（原位置替換）
   for (const ws of Object.values(wsAll())) {
@@ -468,11 +492,11 @@ function wsPromote(vid, sid) { // 第一句話送出：虛擬卡片變成真正�
   }
   api('POST', '/api/prefs', { workspaces: wsAll() }).catch(() => {}); renderSidebar();
 }
-function wsSweepAllStored() { // 重開 app：每個工作區「還沒取名字」的半成品卡片清一次（當機／直接關閉時留下的）
+function wsSweepAllStored() { // 重開 app／重新整理：每個工作區的空白卡片都清一次（當機／直接關閉時留下的，不論有沒有命名過）
   let ch = false;
   for (const ws of Object.values(wsAll())) {
     if (!ws.vcards) continue;
-    for (const [gid, vc] of Object.entries(ws.vcards)) if (!vc.name) {
+    for (const [gid, vc] of Object.entries(ws.vcards)) {
       delete ws.vcards[gid]; ch = true;
       (ws.groups || []).forEach(g => { g.sessions = g.sessions.filter(x => x !== vc.vid); });
     }
@@ -502,7 +526,7 @@ function enterFocus(cwd) {
   S.focusSaved = paneIds();                      // 進入前開著的視窗，退出時還原
   S.focusKey = folderKey(cwd); S.focusCwd = cwd; persistFocus();
   const ws = wsGet(), want = ws.panes || {};
-  wsSweepVirtual(true); // 上次當機留下的、沒命名的空白卡片
+  wsSweepVirtual(true); // 進入：先把上次留下的空白卡片全部清掉
   renderSidebar();
   // 還原這個工作區上次的視窗；沒有就沿用已經在這個資料夾裡的；其餘一律不能留在畫面上
   const L = want.L && inFocusFolder(want.L) ? want.L : (S.focusSaved.L && inFocusFolder(S.focusSaved.L) ? S.focusSaved.L : null);
@@ -516,7 +540,7 @@ function enterFocus(cwd) {
 }
 function exitFocus() {
   if (!S.focusKey) return;
-  wsSweepVirtual(true); // 退出時若還有「還沒取名字」的半成品卡片就清掉（取過名字的會保留）
+  wsSweepVirtual(true); // 退出：空白卡片（不論有沒有命名過）一律清掉，不留到下次
   wsGet().panes = paneIds();                      // 記住這個工作區的視窗，下次進入還原
   const saved = S.focusSaved;
   api('POST', '/api/prefs', { workspaces: wsAll() }).catch(() => {});
