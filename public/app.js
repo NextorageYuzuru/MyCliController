@@ -46,7 +46,7 @@ let btwBusy = 0;      // how many btw answers are still streaming
 // the pane being worked on is copied into them (withPane), and copied back out afterwards. The composer at the
 // bottom is shared and always shows the ACTIVE pane (the one the mouse was last pressed in).
 const PANE_KEYS = ['web', 'draft', 'cur','cwd', 'msgs', 'stream', 'toolEls', 'images', 'showAllMsgs', 'stick', 'ctx', 'model', 'loading', 'pending', 'attachments'];
-const newPaneState = () => ({ web: null, draft: null, cur: null, cwd: '', msgs: [], stream: '', toolEls: new Map(), images: [], showAllMsgs: false, stick: true, ctx: null, model: '', loading: false, pending: [], attachments: [], input: '' });
+const newPaneState = () => ({ web: null, draft: null, cur: null, cwd: '', msgs: [], stream: '', toolEls: new Map(), images: [], showAllMsgs: false, stick: true, ctx: null, model: '', loading: false, pending: [], attachments: [], input: '', ckey: null });
 let T = null, tail = null;      // transcript element and live tail of the pane currently loaded into S
 let CTX = null, ACTIVE = null;  // pane currently loaded into S; pane that has the composer
 const PANE = {};                // PANE.L, PANE.R (built at the bottom of this file)
@@ -516,7 +516,7 @@ async function wsRefreshSession(s) {
   if (ws.short.sub === s.id) ws.short.sub = null;
   UNREAD.delete(s.id); S.sessions = S.sessions.filter(x => x.id !== s.id);
   let first = true;
-  for (const p of panesOn()) if (paneShows(p, s.id)) withPane(p, () => { newDraft(S.focusCwd); if (first) { S.draft = { vid }; first = false; } }); // 正在看它的視窗：換成這張空白卡片
+  for (const p of panesOn()) if (paneShows(p, s.id)) withPane(p, () => { newDraft(S.focusCwd, first ? vid : undefined); first = false; }); // 正在看它的視窗：換成這張空白卡片
   wsSave(); loadSessions().catch(() => {});
   toast('已刷新：原位置換成同名的空白卡片（舊對話在資源回收筒）');
 }
@@ -553,7 +553,7 @@ function wsOpenVirtual(vid) {
   const shown = panesOn().find(p => pst(p).draft && pst(p).draft.vid === vid);
   if (shown) { setActive(shown); return; }
   if (ACTIVE !== PANE.L) setActive(PANE.L);
-  withPane(PANE.L, () => { newDraft(S.focusCwd); S.draft = { vid }; });
+  withPane(PANE.L, () => newDraft(S.focusCwd, vid));
   renderSidebar();
 }
 function wsAddSession(gid) {
@@ -767,7 +767,7 @@ function webUnit() {
   if (!collapsed) {
     for (const w of pages) {
       const d = el('div', { class: 'sitem' + (webShownIn(w.id).length ? ' active' : ''), title: w.path || '（還沒選檔案）' },
-        el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, '🌐 ' + webLabel(w))));
+        el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, webLabel(w))));
       d.onclick = () => openWebMain(w.id);
       d.oncontextmenu = e => { e.preventDefault(); webPageMenu(w, e.clientX, e.clientY); };
       g.append(d);
@@ -893,7 +893,7 @@ function renderHeads() { for (const p of panesOn()) withPane(p, renderHead); }
 function renderHead() {
   const s = curSession(), h = CTX.hdr, draft = !!S.draft;
   const w = S.web ? webPages().find(x => x.id === S.web) : null;
-  h.title.textContent = S.web ? '🌐 ' + (w ? webLabel(w) : '') : draft ? '新對話' : s ? dispTitle(s) : '';
+  h.title.textContent = S.web ? (w ? webLabel(w) : '') : draft ? '新對話' : s ? dispTitle(s) : '';
   h.cwd.textContent = S.web ? '' : S.cwd ? S.cwd : '';
   h.cwd.hidden = S.web || !S.cwd;
   h.model.textContent = S.model ? '· ' + S.model : '';
@@ -962,6 +962,42 @@ $('#selEffort').onchange = () => onCfgChange('effort', $('#selEffort').value);
 $('#selPerm').onchange = () => onCfgChange('permissionMode', $('#selPerm').value);
 
 const input = $('#input');
+// ---------- 輸入區暫存（每張卡片各自的草稿）----------
+// 輸入框是共用的；打到一半（文字＋貼上的圖片）切到別張卡片時，把它存在 DRAFTS（key＝卡片），切回來再還原。
+// 每格記著「輸入區目前載入的是哪張卡片的內容」（st.ckey）；卡片一換，refreshComposer → syncComposers 就會存舊的、還原新的。
+// 只存在記憶體（重新整理頁面就沒有，圖片太大不適合放 localStorage）。
+const DRAFTS = new Map();   // key -> { text, atts }
+let inputOwner = null;      // 輸入框裡的字目前屬於哪一格（其餘格的字放在 st.input）
+function composerKey(p) {
+  const st = pst(p);
+  if (st.web) return null;
+  if (st.draft) return st.draft.vid ? 'v:' + st.draft.vid : 'n:' + (p.uid || (p.uid = crypto.randomUUID()));
+  return st.cur ? 's:' + st.cur : null;
+}
+const textOf = p => (p === inputOwner ? input.value : p.st.input) || '';
+function setTextOf(p, t) { if (p === inputOwner) { input.value = t; autosize(); } else p.st.input = t; }
+function claimInput() { // 輸入框歸屬換到現在的 composerPane：舊主人的字停放到 st.input，載入新主人的字
+  const o = composerPane();
+  if (inputOwner === o) return;
+  if (inputOwner) inputOwner.st.input = input.value;
+  inputOwner = o; input.value = o.st.input || ''; autosize();
+}
+function stashComposer(p) {
+  const k = p.st.ckey; if (!k) return;
+  const text = textOf(p), atts = pst(p).attachments.slice();
+  if (text.trim() || atts.length) DRAFTS.set(k, { text, atts }); else DRAFTS.delete(k);
+}
+function syncComposer(p) {
+  const k = composerKey(p);
+  if (k === p.st.ckey) return;
+  stashComposer(p);
+  const d = k && DRAFTS.get(k);
+  if (k) DRAFTS.delete(k); // 內容回到輸入區了
+  p.st.ckey = k;
+  setTextOf(p, d ? d.text : '');
+  pst(p).attachments = d ? d.atts.slice() : [];
+}
+function syncComposers() { claimInput(); for (const p of panesOn()) syncComposer(p); }
 function autosize() { if ($('#composer').hidden) return; input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, innerHeight * 0.4) + 'px'; }
 input.addEventListener('input', autosize);
 input.addEventListener('keydown', e => {
@@ -993,12 +1029,14 @@ $('#main').addEventListener('drop', e => {
 $('#btnAttach').onclick = () => $('#fileInput').click();
 $('#fileInput').onchange = e => { [...e.target.files].forEach(addAttachment); e.target.value = ''; };
 function addAttachment(file) {
-  const fr = new FileReader(), p = ACTIVE;
+  const fr = new FileReader(), p = composerPane(), k = composerKey(p);
   fr.onload = () => {
     const url = fr.result; const m = url.match(/^data:([^;]+);base64,(.*)$/);
     if (!m) return;
     if (!/^image\/(png|jpeg|gif|webp)$/.test(m[1])) { toast('只支援 PNG / JPEG / GIF / WebP'); return; }
-    withPane(p, () => { S.attachments.push({ mediaType: m[1], data: m[2], url, name: file.name || 'image' }); renderAttachments(); });
+    const at = { mediaType: m[1], data: m[2], url, name: file.name || 'image' };
+    if (composerKey(p) !== k) { if (k) { const d = DRAFTS.get(k) || { text: '', atts: [] }; d.atts.push(at); DRAFTS.set(k, d); } return; } // 讀檔期間已切到別張卡片：存回原本那張
+    withPane(p, () => { S.attachments.push(at); renderAttachments(); });
   };
   fr.readAsDataURL(file);
 }
@@ -1012,7 +1050,7 @@ function renderAttachments() {
 }
 // empty the composer of pane p (its text and attachments); p may be the active pane or not
 function clearComposerOf(p) {
-  if (p === ACTIVE) { input.value = ''; autosize(); } else p.st.input = '';
+  setTextOf(p, '');
   withPane(p, () => { S.attachments = []; renderAttachments(); });
 }
 
@@ -1035,6 +1073,7 @@ async function send(override) {
       const vid = pst(p).draft && pst(p).draft.vid; // 這是從工作群的虛擬空白卡片開出來的草稿
       const d = await api('POST', '/api/sessions', { cwd: S.cwd, ...cfgFromSelectors() });
       withPane(p, () => { S.draft = null; S.cur = d.id; S.cwd = d.cwd; S.msgs = []; renderTranscript(); });
+      p.st.ckey = 's:' + d.id; // 輸入區的內容跟著升級成這個對話
       if (vid) wsPromote(vid, d.id);
       ls('cc_last', d.id);
       await loadSessions();
@@ -1065,7 +1104,7 @@ function renderComposerState() {
   });
 }
 // everything the composer shows for the active pane
-function refreshComposer() { inActive(() => { $('#composer').hidden = !!S.web; syncSelectors(); renderCtxActive(); renderAttachments(); renderComposerState(); if (!S.web) autosize(); }); } // 輸入框藏起來時量到的高度是 0：重新顯示後要重算，否則會縮成一條細線
+function refreshComposer() { syncComposers(); inActive(() => { $('#composer').hidden = !!S.web; syncSelectors(); renderCtxActive(); renderAttachments(); renderComposerState(); if (!S.web) autosize(); }); } // 輸入框藏起來時量到的高度是 0：重新顯示後要重算，否則會縮成一條細線
 
 // ---------- message queue ----------
 // While Claude works, sent messages wait here (per session) and go out by themselves when the turn ends.
@@ -1121,8 +1160,8 @@ function renderQueueActive() {
 
 // ---------- new session (draft) ----------
 // new conversation in the pane that is loaded (the active one, unless called through withPane)
-function newDraft(cwd) {
-  S.web = null; S.draft = { }; S.cur = null; S.msgs = []; S.model = ''; S.ctx = null;
+function newDraft(cwd, vid) {
+  S.web = null; S.draft = vid ? { vid } : { }; S.cur = null; S.msgs = []; S.model = ''; S.ctx = null;
   S.cwd = S.focusKey ? S.focusCwd : (cwd || S.prefs.lastCwd || ''); // 專注模式：新對話一律開在這個資料夾
   renderSidebar(); renderHead(); renderTranscript(); refreshComposer();
   if (CTX === ACTIVE) input.focus();
@@ -1587,6 +1626,7 @@ function handleEvent(ev) {
       break;
     case 'rate': renderRate(ev.rate); break;
     case 'accounts': S.rate = ev.rate || null; renderAccounts(ev.accounts); renderRate(); break;
+    case 'acctWarn': acctWarn(ev, inShown); break;
     case 'auth': renderAuth(ev.auth); break;
     case 'prompts': loadPrompts(); break;
     case 'notice': // e.g. a message that will go out once the previous claude process has exited
@@ -1653,64 +1693,104 @@ async function refreshUsage() {
 }
 $('#uRefresh').onclick = () => refreshUsage();
 try { localStorage.removeItem('cc_usage_every'); } catch {} // the old auto-refresh setting is gone
-// The account lives in ⚙ 設定 → 帳號與用量; the sidebar only shows an alert when the CLI is not logged in.
+// The account lives in ⚙ 設定 → 帳號; the sidebar shows an alert only when the account in use has a problem.
 function renderAuth(a) {
   if (!a) return;
   S.auth = a; renderRate();
-  if (S.accounts) renderAccounts(S.accounts); // the CLI login's email names the default account
-  $('#authAlert').hidden = !!a.loggedIn;
   if (!$('#settingsModal').hidden) renderSettings();
 }
 function doLogin() { api('POST', '/api/login').then(() => toast('已開啟登入視窗，登入完成後這裡會自動更新', 6000)).catch(e => toast(e.message)); }
-function recheckAuth() { return api('GET', '/api/auth').then(d => { renderAuth(d.auth); toast(d.auth.loggedIn ? '已登入' : '未登入'); }); }
-$('#btnLoginAlert').onclick = doLogin;
+function recheckAuth() { return api('GET', '/api/auth').then(d => { renderAuth(d.auth); toast(d.auth.loggedIn ? '主帳號：已登入' : '主帳號：CLI 尚未登入'); }); }
 
 // ---------- accounts ----------
-// 'default' is the CLI login; the others are `claude setup-token` tokens kept (encrypted) by the server.
-// The usage box always shows the active account; switching applies to every message sent from then on.
+// 主帳號 = the CLI login (same as claude in PowerShell); 副帳號 = `claude setup-token` tokens kept by the server.
+// Every state is allowed (you can switch to an account that is logged out / out of quota); the UI just says so.
+// The usage box always shows the account in use; switching applies to every message sent from then on.
+const acctList = () => ((S.accounts || {}).list || []);
+const acctOf = id => acctList().find(x => x.id === id);
+const acctKind = x => (x && x.kind === 'main' ? '主' : '副');
+const acctName = x => (x ? `${x.kind === 'main' ? '主帳號' : '副帳號'}「${x.label}」` : '');
+const acctBad = x => x && x.status && x.status.code !== 'ok';
 function renderAccounts(a) {
   if (!a) return;
   S.accounts = a;
   const sel = $('#uAcct'); sel.innerHTML = '';
-  for (const x of a.list) sel.append(el('option', { value: x.id }, x.kind === 'default' ? acctDefaultName() : x.label));
+  for (const x of a.list) sel.append(el('option', { value: x.id }, `${acctKind(x)}｜${x.label}` + (acctBad(x) ? `（${x.status.text}）` : '')));
   sel.value = a.active; sel.hidden = a.list.length < 2;
+  sel.classList.toggle('bad', acctBad(acctOf(a.active)));
+  renderAcctAlert();
   if (!$('#settingsModal').hidden) renderSettings();
 }
-const acctDefaultName = () => (S.auth && S.auth.email) || 'CLI 登入帳號';
-const acctLabel = id => { const x = ((S.accounts || {}).list || []).find(y => y.id === id); return !x ? id : x.kind === 'default' ? acctDefaultName() : x.label; };
+// sidebar alert for the account in use: what is wrong and what to do
+function renderAcctAlert() {
+  const box = $('#authAlert'), x = acctOf((S.accounts || {}).active);
+  box.innerHTML = '';
+  if (!x || !acctBad(x)) { box.hidden = true; return; }
+  const others = acctList().filter(y => y.id !== x.id && !acctBad(y));
+  const sw = others.length ? el('button', { class: 'btn small', title: '切換到可以用的帳號', onclick: () => switchAccount(others[0].id) }, '切到' + acctKind(others[0]) + '｜' + others[0].label) : null;
+  const msg = { loggedOut: '主帳號：CLI 尚未登入', invalid: `副帳號「${x.label}」token 失效`, limited: `${acctName(x)}額度用完（${(x.status.text.split('・')[1] || '').trim()}）` }[x.status.code] || x.status.text;
+  box.append(el('span', { class: 'aamsg', title: msg }, msg), el('span', { class: 'grow' }),
+    x.status.code === 'loggedOut' ? el('button', { class: 'btn small primary', title: '開一個 PowerShell 視窗執行 claude auth login', onclick: doLogin }, '登入') : null,
+    x.status.code === 'invalid' ? el('button', { class: 'btn small', onclick: openSettings }, '設定') : null, sw);
+  box.hidden = false;
+}
 async function switchAccount(id) {
   try {
     const d = await api('POST', '/api/accounts/use', { id });
     renderAccounts(d.accounts);
-    const busy = S.running.size;
-    toast(`已切換到「${acctLabel(id)}」` + (busy ? '。正在執行的對話這一輪結束後才會換過去' : '，之後送出的訊息都用這個帳號'), 6000);
+    const x = acctOf(id), st = d.status || (x && x.status) || {};
+    if (st.code && st.code !== 'ok') {
+      const why = { loggedOut: '主帳號的 CLI 目前沒有登入，送出訊息會失敗。請先按「登入」。', invalid: '這個副帳號的 token 先前被拒絕過（可能過期或已撤銷），送出訊息可能會失敗。', limited: `這個帳號的額度目前用完了（${st.text}），送出訊息可能會失敗。` }[st.code] || st.text;
+      toast(`已切換到${acctName(x)}。注意：${why}`, 9000);
+    } else toast(`已切換到${acctName(x)}` + (S.running.size ? '。正在執行的對話這一輪結束後才會換過去' : '，之後送出的訊息都用這個帳號'), 6000);
   } catch (e) { toast(e.message, 6000); renderAccounts(S.accounts); }
 }
 $('#uAcct').onchange = e => switchAccount(e.target.value);
+// a problem found after something was sent (quota used up, token rejected, CLI logged out / changed):
+// toast + a line in the conversation it happened in + a desktop notification when the window is not in front
+function acctWarn(ev, inShown) {
+  const lines = String(ev.text || '').split('\n');
+  const big = ev.level === 'limit' || ev.level === 'invalid' || ev.level === 'auth' || ev.level === 'loggedOut';
+  toast('⚠ ' + lines.join(' '), big ? 15000 : 9000);
+  const sysline = () => insert(el('div', { class: 'sysline acctwarn' + (big ? ' err' : '') }, '⚠ ' + lines[0], lines[1] ? el('div', { class: 'muted small' }, lines.slice(1).join(' ')) : null));
+  if (ev.sid) inShown(sysline);
+  if (big && document.visibilityState !== 'visible') notify('帳號需要處理', lines[0]);
+}
 function acctAction(url, body, done) {
   return api('POST', url, body).then(d => { renderAccounts(d.accounts); if (done) toast(done); }).catch(e => toast(e.message, 6000));
 }
+const acctBadge = x => {
+  const code = x.status && x.status.code;
+  return code && code !== 'ok' ? el('span', { class: 'acctbadge bad', title: x.status.text }, x.status.text) : null;
+};
 // rows for ⚙ 設定 → 帳號
 function accountRows() {
   const a = S.accounts || { active: 'default', list: [] }, au = S.auth || {};
+  const main = acctOf('default') || { id: 'default', kind: 'main', label: au.email || 'CLI 登入帳號', status: { code: au.loggedIn ? 'ok' : 'loggedOut', text: au.loggedIn ? '' : '尚未登入' } };
   const useBtn = id => a.active === id ? el('span', { class: 'acctbadge' }, '使用中')
-    : el('button', { class: 'btn small primary', title: '之後送出的訊息改用這個帳號', onclick: () => switchAccount(id) }, '使用');
-  const rows = [el('div', { class: 'setrow' },
-    el('div', { class: 'setlabel' }, 'claude CLI 登入帳號', el('div', { class: 'muted small' }, '和 PowerShell 裡的 claude 同一個；登入或登出後這裡會自動更新')),
-    el('div', { class: 'setacct' + (au.loggedIn ? '' : ' err') },
-      (au.loggedIn ? [au.email || '已登入', [au.orgName, au.planTier || au.subscriptionType].filter(Boolean).join(' · ')] : ['尚未登入']).filter(Boolean).map(t => el('div', null, t))),
-    el('button', { class: 'btn icon small', title: '重新檢查登入狀態', onclick: () => recheckAuth() }, '↻'),
-    el('button', { class: 'btn small', title: '開一個 PowerShell 視窗執行 claude auth login', onclick: doLogin }, au.loggedIn ? '換帳號' : '登入'),
-    a.list.length > 1 ? useBtn('default') : null)];
-  for (const x of a.list.filter(y => y.kind === 'token')) rows.push(el('div', { class: 'setrow' },
-    el('div', { class: 'setlabel' }, x.label, el('div', { class: 'muted small' }, 'setup-token 帳號' + (x.addedAt ? '・' + new Date(x.addedAt).toLocaleDateString() + ' 加入' : ''))),
-    el('button', { class: 'btn small', onclick: () => { const v = prompt('帳號名稱', x.label); if (v && v.trim()) acctAction('/api/accounts/rename', { id: x.id, label: v.trim() }); } }, '改名'),
-    el('button', { class: 'btn small', onclick: () => { if (confirm(`移除「${x.label}」？\n\nApp 會刪掉保存的 token。如果要讓這個 token 完全失效，請到 claude.ai 的設定裡撤銷。`)) acctAction('/api/accounts/remove', { id: x.id }, '已移除'); } }, '移除'),
+    : el('button', { class: 'btn small', title: '之後送出的訊息改用這個帳號', onclick: () => switchAccount(id) }, '使用');
+  const subs = acctList().filter(y => y.kind === 'sub');
+  const rows = [
+    el('div', { class: 'acctsec' }, '主帳號（CLI 登入）', el('span', { class: 'muted small' }, '和 PowerShell 裡的 claude 是同一個登入；在任何終端機登入／登出或換帳號，這裡都會自動跟著更新')),
+    el('div', { class: 'setrow' },
+      el('div', { class: 'setlabel' }, el('span', { class: 'acctkind main' }, '主'), ' ', au.loggedIn ? (au.email || '已登入') : '尚未登入', ' ', acctBadge(main),
+        au.loggedIn ? el('div', { class: 'muted small' }, [au.orgName, au.subscriptionType].filter(Boolean).join(' · ')) : null),
+      el('button', { class: 'btn icon small', title: '重新檢查登入狀態', onclick: () => recheckAuth() }, '↻'),
+      el('button', { class: 'btn small' + (au.loggedIn ? '' : ' primary'), title: '開一個 PowerShell 視窗執行 claude auth login（換主帳號也是用這個）', onclick: doLogin }, au.loggedIn ? '換帳號' : '登入'),
+      subs.length ? useBtn('default') : null),
+    el('div', { class: 'acctsec' }, '副帳號（token）', el('span', { class: 'muted small' }, '用 claude setup-token 產生的長效 token，只存在這台電腦（加密），不影響主帳號的登入；額度不夠時切過去接著聊')),
+  ];
+  for (const x of subs) rows.push(el('div', { class: 'setrow' },
+    el('div', { class: 'setlabel' }, el('span', { class: 'acctkind' }, '副'), ' ', x.label, ' ', acctBadge(x),
+      el('div', { class: 'muted small' }, (x.addedAt ? new Date(x.addedAt).toLocaleDateString() + ' 加入' : '') + (x.status.code === 'invalid' ? '・token 被拒絕，請移除後重新新增' : ''))),
+    el('button', { class: 'btn small', onclick: () => { const v = prompt('副帳號名稱', x.label); if (v && v.trim()) acctAction('/api/accounts/rename', { id: x.id, label: v.trim() }); } }, '改名'),
+    el('button', { class: 'btn small', onclick: () => { if (confirm(`移除副帳號「${x.label}」？\n\nApp 會刪掉保存的 token。如果要讓這個 token 完全失效，請到 claude.ai 的設定裡撤銷。`)) acctAction('/api/accounts/remove', { id: x.id }, '已移除'); } }, '移除'),
     useBtn(x.id)));
+  if (!subs.length && !S.acctForm) rows.push(el('div', { class: 'muted small acctnone' }, '還沒有副帳號。'));
   if (!S.acctForm) {
     rows.push(el('div', { class: 'setrow' },
-      el('div', { class: 'setlabel' }, '新增其他帳號', el('div', { class: 'muted small' }, '額度用完時可以切換到另一個帳號，對話紀錄共用、可以直接接著聊')),
-      el('button', { class: 'btn small', onclick: () => { S.acctForm = true; renderSettings(); } }, '＋ 新增帳號')));
+      el('div', { class: 'setlabel' }, el('div', { class: 'muted small' }, '同一個帳號在不同電腦上使用時，每台電腦各自新增一次')),
+      el('button', { class: 'btn small', onclick: () => { S.acctForm = true; renderSettings(); } }, '＋ 新增副帳號')));
     return rows;
   }
   const lab = el('input', { type: 'text', placeholder: '例如：個人 Max、公司帳號', maxlength: '60' });
@@ -1721,16 +1801,16 @@ function accountRows() {
     try {
       const d = await api('POST', '/api/accounts', { label: lab.value, token: tok.value });
       S.acctForm = false; renderAccounts(d.accounts); renderSettings();
-      toast(`已加入「${lab.value.trim()}」。可以在左下「用量」旁邊切換帳號`, 7000);
+      toast(`已加入副帳號「${lab.value.trim()}」。可以在左下「用量」旁邊切換帳號`, 7000);
     } catch (e) { toast(e.message, 8000); go.disabled = false; go.textContent = '驗證並加入'; }
   };
   rows.push(el('div', { class: 'acctform' },
     el('ol', null,
       el('li', null, '按「開啟 setup-token 視窗」，會開一個 PowerShell 執行 ', el('code', null, 'claude setup-token'), '。'),
       el('li', null, '它會打開瀏覽器：請確認瀏覽器登入的是', el('b', null, '要新增的那個帳號'), '（不是的話先在 claude.ai 換帳號，或把網址貼到無痕視窗），然後按授權。'),
-      el('li', null, 'PowerShell 會印出一串 ', el('code', null, 'sk-ant-oat01-'), ' 開頭的 token，複製貼到下面。這個 token 只會加密存在這台電腦，不會影響原本 CLI 的登入。')),
+      el('li', null, 'PowerShell 會印出一串 ', el('code', null, 'sk-ant-oat01-'), ' 開頭的 token，複製貼到下面。這個 token 只會加密存在這台電腦，不會影響主帳號的登入。')),
     el('div', { class: 'acctbtns' }, el('button', { class: 'btn small', onclick: () => api('POST', '/api/accounts/setup-token').catch(e => toast(e.message)) }, '開啟 setup-token 視窗')),
-    el('label', { class: 'field' }, '帳號名稱', lab),
+    el('label', { class: 'field' }, '副帳號名稱', lab),
     el('label', { class: 'field' }, 'Token', tok),
     el('div', { class: 'acctbtns' }, el('button', { class: 'btn small', onclick: () => { S.acctForm = false; renderSettings(); } }, '取消'), go),
     el('div', { class: 'muted small' }, '加入時會用這個 token 送一個極小的 Haiku 請求確認可用，順便取得它的用量。')));
@@ -2314,7 +2394,7 @@ function renderTabs() {
     wrap.append(chip);
     if (!collapsed) for (const w of pages) {
       const sp = webShownIn(w.id)[0];
-      const d = el('div', { class: 'tab' + (sp === ACTIVE ? ' cur' : sp ? ' side' : ''), title: w.path || '（還沒選檔案）' }, el('span', { class: 'ttl' }, '🌐 ' + webLabel(w)));
+      const d = el('div', { class: 'tab' + (sp === ACTIVE ? ' cur' : sp ? ' side' : ''), title: w.path || '（還沒選檔案）' }, el('span', { class: 'ttl' }, webLabel(w)));
       d.onclick = () => openWebMain(w.id);
       d.oncontextmenu = e => { e.preventDefault(); webPageMenu(w, e.clientX, e.clientY); };
       wrap.append(d);
@@ -2672,12 +2752,10 @@ function updateSplit() {
 function setActive(p) {
   if (p === ACTIVE || p.el.hidden) return;
   const old = ACTIVE;
-  const keepText = !!(pst(old).web || p.st.web); // 其中一格是瀏覽器：輸入框的字是屬於另一格對話的，不要存進／換掉
-  if (!keepText) old.st.input = input.value; // keep what was typed in the pane we leave
   saveTo(old);
   closeCmd(); closePop();
   ACTIVE = p; loadPane(p);
-  if (!keepText) { input.value = p.st.input || ''; autosize(); }
+  claimInput(); // 輸入框的字跟著 composerPane 走（其中一格是瀏覽器時不換）
   if (S.cur && !S.draft) ls('cc_last', S.cur);
   if (S.cur && UNREAD.delete(S.cur)) { saveUnread(); renderSidebar(); }
   renderTabs();
@@ -2716,9 +2794,10 @@ function closeRight() {
   if (btwPop && !btwPop.hidden && btwPane === R) btwCancel(); // 小視窗綁在右格：右格要關了，一起關掉
   if (ipPane === R) closeImgPop();
   if (ACTIVE === R) setActive(PANE.L);
+  stashComposer(R); // 右格的草稿留著，之後再開那個對話還在
   R.st = newPaneState(); R.tail = null; R.T.innerHTML = '';
   R.el.hidden = true;
-  updateSplit(); renderTabs();
+  updateSplit(); renderTabs(); refreshComposer();
 }
 
 // 右側（或任何一格）是瀏覽器卡片、焦點在它身上時，點到下方輸入區／在輸入框打字：自動把焦點鎖回有對話的那一格

@@ -364,127 +364,8 @@ function learnWindow(run, modelUsage) {
 
 // ---------- running claude processes ----------
 const runs = new Map(); // session id -> run
-// ---------- accounts ----------
-// 'default' = whatever the claude CLI is logged into (~/.claude/.credentials.json, `claude auth login`).
-// Extra accounts are long-lived tokens from `claude setup-token`, given to each claude we start through
-// CLAUDE_CODE_OAUTH_TOKEN. Everything else (~/.claude: transcripts, settings, MCP, skills) stays shared, so any
-// conversation can continue on any account. Tokens are kept encrypted with Windows DPAPI (current user only).
-store.accounts = Array.isArray(store.accounts) ? store.accounts : [];
-if (!store.activeAccount || (store.activeAccount !== 'default' && !store.accounts.some(a => a.id === store.activeAccount))) store.activeAccount = 'default';
-const PS_EXE = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-function dpapi(protect, text) {
-  return new Promise((resolve, reject) => {
-    const script = 'Add-Type -AssemblyName System.Security; $s=[Security.Cryptography.DataProtectionScope]::CurrentUser; ' + (protect
-      ? '[Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($env:CC_IN),$null,$s))'
-      : '[Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($env:CC_IN),$null,$s))');
-    execFile(PS_EXE, ['-NoProfile', '-NonInteractive', '-Command', '[Console]::OutputEncoding=[Text.Encoding]::UTF8; ' + script],
-      { env: { ...process.env, CC_IN: text }, windowsHide: true, encoding: 'utf8', timeout: 20000 },
-      (err, out) => { const v = String(out || '').trim(); if (err || !v) reject(new Error('無法' + (protect ? '加密' : '解密') + '帳號 token')); else resolve(v); });
-  });
-}
-const tokenCache = new Map(); // account id -> decrypted token
-async function accountToken(id) {
-  if (tokenCache.has(id)) return tokenCache.get(id);
-  const a = store.accounts.find(x => x.id === id); if (!a) throw new Error('找不到帳號');
-  const t = await dpapi(false, a.tokEnc); tokenCache.set(id, t); return t;
-}
-// decrypt up front so starting a conversation never waits on PowerShell
-for (const a of store.accounts) accountToken(a.id).catch(e => log('account', a.id, e.message));
-function accountName(id) { if (id === 'default') return 'CLI 登入帳號'; const a = store.accounts.find(x => x.id === id); return a ? a.label : id; }
-function accountsView() {
-  return { active: store.activeAccount, list: [{ id: 'default', label: accountName('default'), kind: 'default' }]
-    .concat(store.accounts.map(a => ({ id: a.id, label: a.label, kind: 'token', addedAt: a.addedAt }))) };
-}
-function broadcastAccounts() { broadcast({ type: 'accounts', accounts: accountsView(), rate: curRate() }); }
-// Environment for a claude run on the given account. The token beats the CLI login, and an ANTHROPIC_API_KEY
-// would beat the token, so that is removed for token accounts.
-async function acctEnv(id) {
-  const e = cleanEnv();
-  if (id && id !== 'default' && store.accounts.some(a => a.id === id)) {
-    e.CLAUDE_CODE_OAUTH_TOKEN = await accountToken(id);
-    delete e.ANTHROPIC_API_KEY; delete e.ANTHROPIC_AUTH_TOKEN;
-  }
-  return e;
-}
-
-// Plan usage (5-hour / weekly) as claude reports it in rate_limit_event, kept per account. It only arrives while a
-// claude process runs, so keep it (with the time it was received) across restarts instead of showing an undated number.
-const rates = store.rates = store.rates || {};
-if (store.lastRate && !rates.default) rates.default = store.lastRate;
-delete store.lastRate;
-const curRate = () => rates[store.activeAccount] || null;
-function setRate(info, acct = store.activeAccount) {
-  rates[acct] = { ...info, receivedAt: Date.now() }; saveStore();
-  if (acct === store.activeAccount) broadcast({ type: 'rate', rate: rates[acct] });
-  return rates[acct];
-}
-// Refreshing plan usage needs one real API request (claude only learns the numbers from response headers;
-// `/usage` and the get_usage control request return nothing without one). This is the smallest request possible:
-// Haiku, no tools, no MCP, no settings, a one-line system prompt — about 640 input + 3 output tokens.
-// It also checks that an account's token works (`claude auth status` does not).
-const ratePending = new Map();
-function refreshRate(acct = store.activeAccount, force) {
-  const last = rates[acct];
-  if (!force && last && Date.now() - last.receivedAt < 20000) return Promise.resolve(last); // several windows asking at once
-  if (ratePending.has(acct)) return ratePending.get(acct);
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--model', 'haiku',
-    '--tools', '', '--strict-mcp-config', '--disable-slash-commands', '--setting-sources', '', '--system-prompt', 'Reply with a single period.'];
-  const pending = acctEnv(acct).then(env => new Promise((resolve, reject) => {
-    const p = spawn(CLAUDE_BIN, CLAUDE.pre.concat(args), { cwd: os.homedir(), env, windowsHide: true });
-    let buf = '', got = null, err = '';
-    const timer = setTimeout(() => killTree(p.pid), 60000);
-    p.stdout.setEncoding('utf8'); p.stderr.setEncoding('utf8');
-    p.stdout.on('data', d => {
-      buf += d; let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const l = buf.slice(0, i); buf = buf.slice(i + 1);
-        try { const o = JSON.parse(l); if (o.type === 'rate_limit_event' && o.rate_limit_info) got = o.rate_limit_info; else if (o.type === 'result' && o.is_error) err = o.result || err; } catch {}
-      }
-    });
-    p.stderr.on('data', d => { err = (err + d).slice(-1000); });
-    p.on('error', e => { err += e.message; });
-    p.on('close', () => {
-      clearTimeout(timer);
-      if (got) resolve(setRate(got, acct)); else reject(new Error(err.trim() || '沒有取得用量資料'));
-    });
-    p.stdin.on('error', () => {});
-    p.stdin.end('.');
-  })).finally(() => ratePending.delete(acct));
-  ratePending.set(acct, pending);
-  return pending;
-}
-async function addAccount(label, token) {
-  label = String(label || '').trim().slice(0, 60); token = String(token || '').replace(/\s+/g, '');
-  if (!label) throw new Error('請輸入帳號名稱');
-  if (!/^sk-ant-oat\d*-[\w-]{20,}$/.test(token)) throw new Error('這不像 claude setup-token 產生的 token（應該是 sk-ant-oat01- 開頭的一長串）');
-  const id = 'a' + crypto.randomBytes(5).toString('hex');
-  const tokEnc = await dpapi(true, token);
-  // try it before keeping it: one tiny request, which also gives this account's usage
-  store.accounts.push({ id, label, tokEnc, addedAt: Date.now() }); tokenCache.set(id, token);
-  try { await refreshRate(id, true); }
-  catch (e) { store.accounts = store.accounts.filter(a => a.id !== id); tokenCache.delete(id); delete rates[id]; throw new Error('token 無法使用：' + e.message); }
-  saveStore(); log('account added', id, label); broadcastAccounts();
-  return accountsView();
-}
-function removeAccount(id) {
-  if (id === 'default') throw new Error('CLI 登入帳號不能移除');
-  store.accounts = store.accounts.filter(a => a.id !== id); tokenCache.delete(id); delete rates[id];
-  if (store.activeAccount === id) store.activeAccount = 'default';
-  saveStore(); log('account removed', id); broadcastAccounts();
-  return accountsView();
-}
-// Conversations started from now on use this account. A claude that is already running keeps the account it was
-// started with until its process ends (normally right after its turn); its next message starts on the new one.
-function useAccount(id) {
-  if (id !== 'default' && !store.accounts.some(a => a.id === id)) throw new Error('找不到帳號');
-  store.activeAccount = id; saveStore(); log('account switched', id); broadcastAccounts();
-  return accountsView();
-}
-function renameAccount(id, label) {
-  const a = store.accounts.find(x => x.id === id); label = String(label || '').trim().slice(0, 60);
-  if (!a || !label) throw new Error('名稱不可空白');
-  a.label = label; saveStore(); broadcastAccounts(); return accountsView();
-}
+// ---------- accounts (主帳號 = CLI login, 副帳號 = setup-token tokens): see accounts.js ----------
+const ACC = require('./accounts')({ store, saveStore, log, broadcast: (...x) => broadcast(...x), cleanEnv: () => cleanEnv(), claude: CLAUDE, killTree: pid => killTree(pid) });
 function cleanEnv() {
   const e = { ...process.env };
   for (const k of Object.keys(e)) if (k === 'CLAUDECODE' || /^CLAUDE_CODE_(ENTRYPOINT|SSE_PORT|SESSION|PARENT|CHILD)/i.test(k) || /^CLAUDE_AGENT_SDK/i.test(k)) delete e[k];
@@ -531,7 +412,7 @@ async function sendMessage(id, text, images) {
     return;
   }
   const fp = await findFile(id);
-  const acct = store.activeAccount, env = await acctEnv(acct);
+  const acct = ACC.active(), env = await ACC.env(acct);
   const exists = !!fp && fs.existsSync(fp);
   const startOffset = exists ? (await fsp.stat(fp)).size : 0;
   // --replay-user-messages: claude echoes each message we write once it actually takes it in, so we know when
@@ -548,7 +429,7 @@ async function sendMessage(id, text, images) {
   if (model) args.push('--model', model);
   if (effort) args.push('--effort', effort);
   args.push('--permission-mode', permissionMode);
-  log('spawn', r.cwd, acct === 'default' ? '' : '[account ' + accountName(acct) + ']', args.join(' '));
+  log('spawn', r.cwd, acct === ACC.MAIN ? '' : '[account ' + ACC.label(acct) + ']', args.join(' '));
   const proc = spawn(CLAUDE_BIN, CLAUDE.pre.concat(args), { cwd: r.cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   // turnActive: a turn is in progress (what the UI shows as "running"). The process can outlive a turn while
   // background tasks (run_in_background, Monitor…) keep going; bgTasks mirrors claude's own list of them.
@@ -643,7 +524,7 @@ async function runSide(b) {
     timeoutMs = 90000;
   }
   log('side', b.kind, cwd, args.join(' '));
-  const env = await acctEnv(store.activeAccount);
+  const acct = ACC.active(), env = await ACC.env(acct);
   return new Promise(resolve => {
     const p = spawn(CLAUDE_BIN, CLAUDE.pre.concat(args), { cwd, env, windowsHide: true });
     let out = '', err = '';
@@ -655,8 +536,10 @@ async function runSide(b) {
     p.on('close', code => {
       clearTimeout(timer);
       let o = null; try { o = JSON.parse(out.trim().split('\n').pop()); } catch {}
-      if (o) resolve({ text: String(o.result || (o.errors || []).join('\n') || ''), isError: !!o.is_error, durationMs: o.duration_ms, usage: o.usage });
-      else resolve({ isError: true, text: (err.trim() || out.trim() || `claude 結束 (code ${code})`).slice(-3000) });
+      const r = o ? { text: String(o.result || (o.errors || []).join('\n') || ''), isError: !!o.is_error, durationMs: o.duration_ms, usage: o.usage }
+        : { isError: true, text: (err.trim() || out.trim() || `claude 結束 (code ${code})`).slice(-3000) };
+      if (r.isError && b.kind === 'btw') ACC.onError(acct, r.text, sid); else if (!r.isError && b.kind === 'btw') ACC.onSuccess(acct);
+      resolve(r);
     });
     p.stdin.on('error', () => {});
     p.stdin.end(prompt);
@@ -753,6 +636,8 @@ function handleLine(run, line) {
         text: o.is_error ? (o.result || (o.errors || []).join('\n') || o.subtype || '') : '' };
       if (run.stopped) { res.isError = false; res.stopped = true; }
       broadcast({ type: 'result', sid, result: res, ts: Date.now() });
+      // out of quota / token rejected: the account module warns and explains (and marks the account)
+      if (res.isError && !res.stopped) ACC.onError(run.acct, res.text, sid); else if (!res.isError) ACC.onSuccess(run.acct);
       // the result tells us about the login: a success while we think we're logged out, or an auth error → re-check
       if ((!res.isError && authInfo && !authInfo.loggedIn) || (res.isError && /log ?in|auth|401|unauthori|credential|token/i.test(res.text))) scheduleAuth(200);
       learnWindow(run, o.modelUsage);
@@ -768,7 +653,7 @@ function handleLine(run, line) {
       return;
     }
     case 'rate_limit_event':
-      if (o.rate_limit_info) setRate(o.rate_limit_info, run.acct);
+      if (o.rate_limit_info) ACC.onRate(run.acct, o.rate_limit_info, sid);
       return;
     case 'system':
       if (o.subtype === 'init') { run.initModel = o.model; broadcast({ type: 'init', sid, model: o.model, permissionMode: o.permissionMode }); }
@@ -802,6 +687,7 @@ function finish(run, code) {
   if (!run.gotResult) {
     const res = run.stopped ? { stopped: true } : { isError: true, text: `claude 意外結束 (code ${code})\n${run.stderr.trim()}` };
     broadcast({ type: 'result', sid: run.id, result: res, ts: Date.now() });
+    if (res.isError) ACC.onError(run.acct, res.text, run.id);
   }
   if (code && !run.stopped) log('claude exit', code, run.stderr.slice(-800));
   const r = rec(run.id); r.updatedAt = Date.now(); saveStore();
@@ -1011,7 +897,7 @@ function refreshAuth() {
       try { authInfo = JSON.parse(out); } catch { authInfo = { loggedIn: false, error: (err && err.message) || 'unknown' }; }
       authAt = Date.now(); authPending = null;
       if (prev !== authInfo.loggedIn) log('auth', authInfo.loggedIn ? 'logged in ' + (authInfo.email || '') : 'not logged in');
-      broadcast({ type: 'auth', auth: authInfo }); resolve(authInfo);
+      broadcast({ type: 'auth', auth: authInfo }); ACC.onCliAuth(authInfo); resolve(authInfo);
     });
   });
   return authPending;
@@ -1097,12 +983,12 @@ const server = http.createServer(async (req, res) => {
       res.write(': hello\n\n');
       clients.add(res);
       const running = [...runs.values()].filter(r => r.turnActive).map(r => ({ sid: r.id, startedAt: r.startedAt, activity: r.activity, perms: [...r.perms.values()] }));
-      res.write('data: ' + JSON.stringify({ type: 'hello', running, rate: curRate(), accounts: accountsView(), auth: authInfo, version: APP_VERSION }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ type: 'hello', running, rate: ACC.rate(ACC.active()), accounts: ACC.view(), auth: authInfo, version: APP_VERSION }) + '\n\n');
       req.on('close', () => { clients.delete(res); lastClientSeen = Date.now(); });
       if (Date.now() - authAt > 30000) refreshAuth(); // window opened/reloaded: make sure the account shown is current
       return;
     }
-    if (p === '/api/init' && M === 'GET') return json(res, 200, { version: APP_VERSION, prefs: store.prefs, auth: authInfo, rate: curRate(), accounts: accountsView(), home: os.homedir(), sessions: await listSessions() });
+    if (p === '/api/init' && M === 'GET') return json(res, 200, { version: APP_VERSION, prefs: store.prefs, auth: authInfo, rate: ACC.rate(ACC.active()), accounts: ACC.view(), home: os.homedir(), sessions: await listSessions() });
     if (p === '/api/sessions' && M === 'GET') return json(res, 200, { sessions: await listSessions() });
     if (p === '/api/sessions' && M === 'POST') {
       const b = await readBody(req);
@@ -1159,12 +1045,12 @@ const server = http.createServer(async (req, res) => {
       setTimeout(reopenWindow, 150);
       return;
     }
-    if (p === '/api/usage/refresh' && M === 'POST') return json(res, 200, { rate: await refreshRate() });
-    if (p === '/api/accounts' && M === 'GET') return json(res, 200, { accounts: accountsView(), rates: Object.fromEntries(accountsView().list.map(a => [a.id, rates[a.id] || null])) });
-    if (p === '/api/accounts' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: await addAccount(b.label, b.token) }); }
-    if (p === '/api/accounts/use' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: useAccount(String(b.id || '')) }); }
-    if (p === '/api/accounts/rename' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: renameAccount(String(b.id || ''), b.label) }); }
-    if (p === '/api/accounts/remove' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: removeAccount(String(b.id || '')) }); }
+    if (p === '/api/usage/refresh' && M === 'POST') return json(res, 200, { rate: await ACC.refreshRate() });
+    if (p === '/api/accounts' && M === 'GET') return json(res, 200, { accounts: ACC.view(), rates: ACC.rates() });
+    if (p === '/api/accounts' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: await ACC.add(b.label, b.token) }); }
+    if (p === '/api/accounts/use' && M === 'POST') { const b = await readBody(req); return json(res, 200, ACC.use(String(b.id || ''))); }
+    if (p === '/api/accounts/rename' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: ACC.rename(String(b.id || ''), b.label) }); }
+    if (p === '/api/accounts/remove' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: ACC.remove(String(b.id || '')) }); }
     if (p === '/api/accounts/setup-token' && M === 'POST') { openConsole(os.homedir(), 'claude setup-token'); return json(res, 200, { ok: true }); }
     if (p === '/api/side' && M === 'POST') return json(res, 200, await runSide(await readBody(req)));
     if (p === '/api/prompts' && M === 'GET') return json(res, 200, { prompts: store.prompts });
@@ -1247,7 +1133,7 @@ const server = http.createServer(async (req, res) => {
       if (act === 'terminal' && M === 'POST') {
         const cwd = sessionCwd(id); if (!cwd || !fs.existsSync(cwd)) return json(res, 400, { error: '資料夾不存在' });
         const exists = !!(await findFile(id));
-        openConsole(cwd, exists ? `claude --resume ${id}` : 'claude', await acctEnv(store.activeAccount));
+        openConsole(cwd, exists ? `claude --resume ${id}` : 'claude', await ACC.env());
         return json(res, 200, { ok: true });
       }
     }

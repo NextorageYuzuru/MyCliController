@@ -25,11 +25,8 @@
     </div>
     <div id="sessionList"></div>
     <div class="sb-foot">
-      <!-- only shown when the claude CLI is not logged in -->
-      <div id="authAlert" class="authalert" hidden>
-        <span>claude CLI 尚未登入</span><span class="grow"></span>
-        <button id="btnLoginAlert" class="btn small primary" title="開一個 PowerShell 視窗執行 claude auth login">登入</button>
-      </div>
+      <!-- only shown when the account in use has a problem (filled by renderAcctAlert) -->
+      <div id="authAlert" class="authalert" hidden></div>
       <div id="usage">
         <div class="uhead">
           <span class="utitle" title="目前使用中帳號的方案用量，和在 claude 裡打 /usage 看到的一樣">用量</span>
