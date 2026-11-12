@@ -32,7 +32,8 @@
       </div>
       <div id="usage">
         <div class="uhead">
-          <span class="utitle" title="claude CLI 登入帳號的方案用量，和在 claude 裡打 /usage 看到的一樣">用量</span>
+          <span class="utitle" title="目前使用中帳號的方案用量，和在 claude 裡打 /usage 看到的一樣">用量</span>
+          <select id="uAcct" class="uacct" title="切換帳號：之後送出的訊息改用這個帳號（正在執行的對話這一輪結束後才換）" hidden></select>
           <span id="uUpdated" class="muted"></span>
           <span class="grow"></span>
           <button id="uRefresh" class="btn icon small" title="立即更新用量（送出一個極小的 Haiku 請求，約 650 tokens）。對話執行中會自動更新，不需要按">↻</button>

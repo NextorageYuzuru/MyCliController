@@ -1517,6 +1517,7 @@ function handleEvent(ev) {
         S.running.set(r.sid, { startedAt: r.startedAt, activity: r.activity });
         const pm = new Map(); for (const p of r.perms || []) pm.set(p.requestId, p); S.perms.set(r.sid, pm);
       }
+      if (ev.accounts) { S.rate = ev.rate || null; renderAccounts(ev.accounts); renderRate(); }
       if (ev.rate) renderRate(ev.rate); if (ev.auth) renderAuth(ev.auth);
       loadSessions().catch(() => {});
       if (S.helloCount++) for (const p of panesOn()) { const st = pst(p); if (st.cur && !st.draft && !st.loading) openSession(st.cur, p); } // resync after a reconnect
@@ -1585,6 +1586,7 @@ function handleEvent(ev) {
       if (!visibleHere && !(ev.result || {}).stopped) notify('Claude 完成了', (S.sessions.find(s => s.id === ev.sid) || {}).title || '');
       break;
     case 'rate': renderRate(ev.rate); break;
+    case 'accounts': S.rate = ev.rate || null; renderAccounts(ev.accounts); renderRate(); break;
     case 'auth': renderAuth(ev.auth); break;
     case 'prompts': loadPrompts(); break;
     case 'notice': // e.g. a message that will go out once the previous claude process has exited
@@ -1655,12 +1657,85 @@ try { localStorage.removeItem('cc_usage_every'); } catch {} // the old auto-refr
 function renderAuth(a) {
   if (!a) return;
   S.auth = a; renderRate();
+  if (S.accounts) renderAccounts(S.accounts); // the CLI login's email names the default account
   $('#authAlert').hidden = !!a.loggedIn;
   if (!$('#settingsModal').hidden) renderSettings();
 }
 function doLogin() { api('POST', '/api/login').then(() => toast('已開啟登入視窗，登入完成後這裡會自動更新', 6000)).catch(e => toast(e.message)); }
 function recheckAuth() { return api('GET', '/api/auth').then(d => { renderAuth(d.auth); toast(d.auth.loggedIn ? '已登入' : '未登入'); }); }
 $('#btnLoginAlert').onclick = doLogin;
+
+// ---------- accounts ----------
+// 'default' is the CLI login; the others are `claude setup-token` tokens kept (encrypted) by the server.
+// The usage box always shows the active account; switching applies to every message sent from then on.
+function renderAccounts(a) {
+  if (!a) return;
+  S.accounts = a;
+  const sel = $('#uAcct'); sel.innerHTML = '';
+  for (const x of a.list) sel.append(el('option', { value: x.id }, x.kind === 'default' ? acctDefaultName() : x.label));
+  sel.value = a.active; sel.hidden = a.list.length < 2;
+  if (!$('#settingsModal').hidden) renderSettings();
+}
+const acctDefaultName = () => (S.auth && S.auth.email) || 'CLI 登入帳號';
+const acctLabel = id => { const x = ((S.accounts || {}).list || []).find(y => y.id === id); return !x ? id : x.kind === 'default' ? acctDefaultName() : x.label; };
+async function switchAccount(id) {
+  try {
+    const d = await api('POST', '/api/accounts/use', { id });
+    renderAccounts(d.accounts);
+    const busy = S.running.size;
+    toast(`已切換到「${acctLabel(id)}」` + (busy ? '。正在執行的對話這一輪結束後才會換過去' : '，之後送出的訊息都用這個帳號'), 6000);
+  } catch (e) { toast(e.message, 6000); renderAccounts(S.accounts); }
+}
+$('#uAcct').onchange = e => switchAccount(e.target.value);
+function acctAction(url, body, done) {
+  return api('POST', url, body).then(d => { renderAccounts(d.accounts); if (done) toast(done); }).catch(e => toast(e.message, 6000));
+}
+// rows for ⚙ 設定 → 帳號
+function accountRows() {
+  const a = S.accounts || { active: 'default', list: [] }, au = S.auth || {};
+  const useBtn = id => a.active === id ? el('span', { class: 'acctbadge' }, '使用中')
+    : el('button', { class: 'btn small primary', title: '之後送出的訊息改用這個帳號', onclick: () => switchAccount(id) }, '使用');
+  const rows = [el('div', { class: 'setrow' },
+    el('div', { class: 'setlabel' }, 'claude CLI 登入帳號', el('div', { class: 'muted small' }, '和 PowerShell 裡的 claude 同一個；登入或登出後這裡會自動更新')),
+    el('div', { class: 'setacct' + (au.loggedIn ? '' : ' err') },
+      (au.loggedIn ? [au.email || '已登入', [au.orgName, au.planTier || au.subscriptionType].filter(Boolean).join(' · ')] : ['尚未登入']).filter(Boolean).map(t => el('div', null, t))),
+    el('button', { class: 'btn icon small', title: '重新檢查登入狀態', onclick: () => recheckAuth() }, '↻'),
+    el('button', { class: 'btn small', title: '開一個 PowerShell 視窗執行 claude auth login', onclick: doLogin }, au.loggedIn ? '換帳號' : '登入'),
+    a.list.length > 1 ? useBtn('default') : null)];
+  for (const x of a.list.filter(y => y.kind === 'token')) rows.push(el('div', { class: 'setrow' },
+    el('div', { class: 'setlabel' }, x.label, el('div', { class: 'muted small' }, 'setup-token 帳號' + (x.addedAt ? '・' + new Date(x.addedAt).toLocaleDateString() + ' 加入' : ''))),
+    el('button', { class: 'btn small', onclick: () => { const v = prompt('帳號名稱', x.label); if (v && v.trim()) acctAction('/api/accounts/rename', { id: x.id, label: v.trim() }); } }, '改名'),
+    el('button', { class: 'btn small', onclick: () => { if (confirm(`移除「${x.label}」？\n\nApp 會刪掉保存的 token。如果要讓這個 token 完全失效，請到 claude.ai 的設定裡撤銷。`)) acctAction('/api/accounts/remove', { id: x.id }, '已移除'); } }, '移除'),
+    useBtn(x.id)));
+  if (!S.acctForm) {
+    rows.push(el('div', { class: 'setrow' },
+      el('div', { class: 'setlabel' }, '新增其他帳號', el('div', { class: 'muted small' }, '額度用完時可以切換到另一個帳號，對話紀錄共用、可以直接接著聊')),
+      el('button', { class: 'btn small', onclick: () => { S.acctForm = true; renderSettings(); } }, '＋ 新增帳號')));
+    return rows;
+  }
+  const lab = el('input', { type: 'text', placeholder: '例如：個人 Max、公司帳號', maxlength: '60' });
+  const tok = el('input', { type: 'password', placeholder: 'sk-ant-oat01-…', autocomplete: 'off', spellcheck: 'false' });
+  const go = el('button', { class: 'btn small primary' }, '驗證並加入');
+  go.onclick = async () => {
+    go.disabled = true; go.textContent = '驗證中…';
+    try {
+      const d = await api('POST', '/api/accounts', { label: lab.value, token: tok.value });
+      S.acctForm = false; renderAccounts(d.accounts); renderSettings();
+      toast(`已加入「${lab.value.trim()}」。可以在左下「用量」旁邊切換帳號`, 7000);
+    } catch (e) { toast(e.message, 8000); go.disabled = false; go.textContent = '驗證並加入'; }
+  };
+  rows.push(el('div', { class: 'acctform' },
+    el('ol', null,
+      el('li', null, '按「開啟 setup-token 視窗」，會開一個 PowerShell 執行 ', el('code', null, 'claude setup-token'), '。'),
+      el('li', null, '它會打開瀏覽器：請確認瀏覽器登入的是', el('b', null, '要新增的那個帳號'), '（不是的話先在 claude.ai 換帳號，或把網址貼到無痕視窗），然後按授權。'),
+      el('li', null, 'PowerShell 會印出一串 ', el('code', null, 'sk-ant-oat01-'), ' 開頭的 token，複製貼到下面。這個 token 只會加密存在這台電腦，不會影響原本 CLI 的登入。')),
+    el('div', { class: 'acctbtns' }, el('button', { class: 'btn small', onclick: () => api('POST', '/api/accounts/setup-token').catch(e => toast(e.message)) }, '開啟 setup-token 視窗')),
+    el('label', { class: 'field' }, '帳號名稱', lab),
+    el('label', { class: 'field' }, 'Token', tok),
+    el('div', { class: 'acctbtns' }, el('button', { class: 'btn small', onclick: () => { S.acctForm = false; renderSettings(); } }, '取消'), go),
+    el('div', { class: 'muted small' }, '加入時會用這個 token 送一個極小的 Haiku 請求確認可用，順便取得它的用量。')));
+  return rows;
+}
 
 // ---------- image viewer (right split) ----------
 let vCur = null;
@@ -2527,17 +2602,9 @@ const setSection = title => el('div', { class: 'setsec' }, title);
 // Everything configurable lives here, grouped; nothing in here is duplicated elsewhere in the UI.
 function renderSettings() {
   const body = $('#setBody'); body.innerHTML = '';
-  const a = S.auth || {};
-  const acct = a.loggedIn
-    ? [a.email || '已登入', [a.orgName, a.planTier || a.subscriptionType].filter(Boolean).join(' · ')].filter(Boolean)
-    : ['尚未登入'];
   body.append(
     setSection('帳號'),
-    el('div', { class: 'setrow' },
-      el('div', { class: 'setlabel' }, 'claude CLI 登入帳號', el('div', { class: 'muted small' }, '登入或登出後這裡會自動更新')),
-      el('div', { class: 'setacct' + (a.loggedIn ? '' : ' err') }, acct.map(t => el('div', null, t))),
-      el('button', { class: 'btn icon small', title: '重新檢查登入狀態', onclick: () => recheckAuth() }, '↻'),
-      el('button', { class: 'btn small' + (a.loggedIn ? '' : ' primary'), title: '開一個 PowerShell 視窗執行 claude auth login', onclick: doLogin }, a.loggedIn ? '換帳號' : '登入')),
+    ...accountRows(),
     setSection('外觀'),
     segRow('主題', '視窗最上面的標題列顏色要「關掉視窗再開」才會跟著換', THEMES, ls('cc_theme') || 'system', v => changeTheme(v)),
     setSection('左側列表'),
@@ -2675,6 +2742,7 @@ updateFocusMarks();
     if (!GROUP_MODES[S.prefs.groupBy]) S.prefs.groupBy = 'folder';
     if ((S.prefs.windowTheme || 'system') !== (ls('cc_theme') || 'system')) saveWindowTheme(ls('cc_theme') || 'system');
     renderSortBtn();
+    S.rate = d.rate || null; renderAccounts(d.accounts);
     renderAuth(d.auth); renderRate(d.rate);
   } catch (e) { toast('無法連線到伺服器: ' + e.message, 10000); }
   connect();
