@@ -1739,15 +1739,29 @@ function renderAcctAlert() {
     x.status.code === 'invalid' ? el('button', { class: 'btn small', onclick: openSettings }, '設定') : null, sw);
   box.hidden = false;
 }
+// Strict: before switching, list everything that could go wrong (account status, conversations still running on
+// the old account, ones kept alive by background tasks) and ask. Nothing to warn about → switch right away.
+const ACCT_WHY = { loggedOut: '主帳號的 CLI 目前沒有登入，送出訊息會失敗（請先到 ⚙ 設定 → 帳號按「登入」）。', invalid: '這個副帳號的 token 先前被拒絕過（可能過期或已撤銷），送出訊息可能會失敗。' };
 async function switchAccount(id) {
+  if (S.accounts && id === S.accounts.active) return;
   try {
-    const d = await api('POST', '/api/accounts/use', { id });
+    const imp = await api('GET', '/api/accounts/impact?to=' + encodeURIComponent(id));
+    const warns = [];
+    const st = imp.target || {};
+    if (st.code && st.code !== 'ok') warns.push('⚠ ' + (ACCT_WHY[st.code] || `這個帳號目前${st.text}，送出訊息可能會失敗。`));
+    const turning = imp.runs.filter(r => r.turnActive), bg = imp.runs.filter(r => !r.turnActive && r.bgTasks);
+    const li = r => `　・${r.title.slice(0, 40)}（${r.acct}${r.bgTasks ? `，背景工作 ${r.bgTasks} 個` : ''}）`;
+    if (turning.length) warns.push(`⚠ 這些對話正在執行，這一輪會繼續用原本的帳號跑完；執行中插話送出的訊息也還是用原本的帳號：\n${turning.map(li).join('\n')}`);
+    if (bg.length) warns.push(`⚠ 這些對話還有背景工作在跑，程式不會結束：之後送給它們的訊息仍會用原本的帳號（如果原本的帳號額度用完會繼續失敗），直到按停止為止：\n${bg.map(li).join('\n')}`);
+    let stopBg = false;
+    if (warns.length) {
+      warns.push('另外：換帳號後，每段對話的第一則訊息會重新讀取整段上下文，比平常吃更多新帳號的額度。');
+      if (!confirm(`切換到${imp.to}？\n\n${warns.join('\n\n')}\n\n確定要切換嗎？`)) { renderAccounts(S.accounts); return; }
+      if (bg.length) stopBg = confirm(`要現在停止上面 ${bg.length} 個有背景工作的對話，讓它們之後也改用${imp.to}嗎？\n\n按「確定」：停止（背景工作會中斷）\n按「取消」：不停止，它們繼續用原本的帳號`);
+    }
+    const d = await api('POST', '/api/accounts/use', { id, stopBg });
     renderAccounts(d.accounts);
-    const x = acctOf(id), st = d.status || (x && x.status) || {};
-    if (st.code && st.code !== 'ok') {
-      const why = { loggedOut: '主帳號的 CLI 目前沒有登入，送出訊息會失敗。請先按「登入」。', invalid: '這個副帳號的 token 先前被拒絕過（可能過期或已撤銷），送出訊息可能會失敗。', limited: `這個帳號的額度目前用完了（${st.text}），送出訊息可能會失敗。` }[st.code] || st.text;
-      toast(`已切換到${acctName(x)}。注意：${why}`, 9000);
-    } else toast(`已切換到${acctName(x)}` + (S.running.size ? '。正在執行的對話這一輪結束後才會換過去' : '，之後送出的訊息都用這個帳號'), 6000);
+    toast(`已切換到${imp.to}` + (d.stopped ? `，已停止 ${d.stopped} 個有背景工作的對話` : '') + (turning.length ? '。正在執行的對話這一輪結束後才會換過去' : '，之後送出的訊息都用這個帳號'), 7000);
   } catch (e) { toast(e.message, 6000); renderAccounts(S.accounts); }
 }
 $('#uAcct').onchange = e => switchAccount(e.target.value);

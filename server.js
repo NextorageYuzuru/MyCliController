@@ -400,6 +400,9 @@ async function sendMessage(id, text, images) {
     }
   }
   if (run && !run.exited) {
+    // still on the account it was started with (the user switched since): say so, it is easy to miss
+    if (run.acct !== ACC.active())
+      broadcast({ type: 'notice', sid: id, text: `這則訊息仍用${ACC.fullName(run.acct)}送出：這個對話的程式還在執行（${run.turnActive ? '這一輪還沒結束' : '有背景工作'}），要等它結束或按停止後，才會改用目前選的${ACC.fullName(ACC.active())}` });
     // claude's process is still alive: write it in right away, like the Desktop app does.
     // - mid-turn: claude picks it up as soon as the current step finishes and answers within the same turn (插話)
     // - turn over but the process lives on (e.g. a background task is running): it starts a new turn at once
@@ -637,7 +640,11 @@ function handleLine(run, line) {
       if (run.stopped) { res.isError = false; res.stopped = true; }
       broadcast({ type: 'result', sid, result: res, ts: Date.now() });
       // out of quota / token rejected: the account module warns and explains (and marks the account)
-      if (res.isError && !res.stopped) ACC.onError(run.acct, res.text, sid); else if (!res.isError) ACC.onSuccess(run.acct);
+      if (res.isError && !res.stopped) {
+        // an account problem while background tasks keep this process (and its account) alive: switching alone won't help
+        if (ACC.onError(run.acct, res.text, sid) && run.bgTasks.length)
+          broadcast({ type: 'notice', sid, text: `這個對話還有 ${run.bgTasks.length} 個背景工作在跑，程式不會結束，之後送出的訊息仍會用${ACC.fullName(run.acct)}。要換帳號重送，請先按停止（背景工作會中斷）。` });
+      } else if (!res.isError) ACC.onSuccess(run.acct);
       // the result tells us about the login: a success while we think we're logged out, or an auth error → re-check
       if ((!res.isError && authInfo && !authInfo.loggedIn) || (res.isError && /log ?in|auth|401|unauthori|credential|token/i.test(res.text))) scheduleAuth(200);
       learnWindow(run, o.modelUsage);
@@ -709,6 +716,18 @@ function stopRun(id) {
   setActivity(run, '停止中…');
   run.killTimer = setTimeout(() => { if (!run.exited) killTree(run.proc.pid); }, 5000);
   return true;
+}
+// What switching to account `to` would leave behind: every claude process still alive on another account.
+// A running turn finishes there (and messages sent into it mid-turn use it too); a process kept alive by
+// background tasks keeps taking new messages on its old account until it is stopped.
+function switchImpact(to) {
+  const title = id => { const r = store.sessions[id] || {}; return r.title || r.autoTitle || id.slice(0, 8); };
+  const list = [];
+  for (const r of runs.values()) {
+    if (r.exited || r.acct === to || (r.inputClosed && !r.turnActive)) continue; // already on its way out
+    list.push({ sid: r.id, title: title(r.id), acct: ACC.fullName(r.acct), turnActive: !!r.turnActive, bgTasks: r.bgTasks.length });
+  }
+  return { from: ACC.fullName(ACC.active()), to: ACC.fullName(to), target: ACC.status(to), runs: list };
 }
 function killTree(pid) { if (!pid) return; try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch {} }
 // Stop every claude we started, save the store, and end this process — used by the 關閉/重啟後端 buttons and by a
@@ -1048,7 +1067,16 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/usage/refresh' && M === 'POST') return json(res, 200, { rate: await ACC.refreshRate() });
     if (p === '/api/accounts' && M === 'GET') return json(res, 200, { accounts: ACC.view(), rates: ACC.rates() });
     if (p === '/api/accounts' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: await ACC.add(b.label, b.token) }); }
-    if (p === '/api/accounts/use' && M === 'POST') { const b = await readBody(req); return json(res, 200, ACC.use(String(b.id || ''))); }
+    if (p === '/api/accounts/impact' && M === 'GET') return json(res, 200, switchImpact(String(u.searchParams.get('to') || '')));
+    if (p === '/api/accounts/use' && M === 'POST') {
+      const b = await readBody(req), id = String(b.id || '');
+      const out = ACC.use(id);
+      // optional: stop conversations that are idle but kept alive by background tasks on another account,
+      // so their next message starts on the new one (their background tasks end)
+      let stopped = 0;
+      if (b.stopBg) for (const r of runs.values()) if (!r.exited && !r.turnActive && r.acct !== id && r.bgTasks.length) { stopRun(r.id); stopped++; }
+      return json(res, 200, { ...out, stopped });
+    }
     if (p === '/api/accounts/rename' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: ACC.rename(String(b.id || ''), b.label) }); }
     if (p === '/api/accounts/remove' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: ACC.remove(String(b.id || '')) }); }
     if (p === '/api/accounts/setup-token' && M === 'POST') { openConsole(os.homedir(), 'claude setup-token'); return json(res, 200, { ok: true }); }
