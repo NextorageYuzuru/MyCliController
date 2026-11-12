@@ -493,3 +493,20 @@ img.thumb { max-width: 260px; max-height: 180px; border-radius: 6px; border: 1px
 .tfold.tbr .tab.cur::before { content: '>'; color: var(--bk); font-weight: 800; flex: none; line-height: 1; }
 #tabScroll > .tab.cur { box-shadow: none; }
 #tabScroll > .tab.cur:not(.vtab)::before { content: '>'; color: color-mix(in srgb, var(--text) 50%, var(--bg)); font-weight: 800; flex: none; line-height: 1; }
+
+/* 瀏覽器分頁（窗格裡的瀏覽器卡片）：網址列＋整格 iframe */
+.transcript.web { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.webbar { display: flex; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--panel); flex: none; }
+.webbar .webaddr { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 12px; }
+.webview { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #fff; }
+.webframe { position: absolute; left: 0; top: 0; border: 0; background: #fff; transform-origin: 0 0; }
+.webbar .webzoom { flex: none; width: auto; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 12px; }
+.webempty { padding: 28px 18px; text-align: center; }
+
+/* 側欄頂部：拿掉標題列，來源／排序下面多一行純圖示的控制按鈕（瀏覽器分頁顯示／隱藏、新對話、收起左側） */
+.sb-ctl { display: flex; justify-content: space-evenly; align-items: center; padding: 0 12px 6px; }
+.sb-ctl .btn.icon, .sb-ctl .btn.icon.primary { width: 28px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: none; border: 0; box-shadow: none; color: var(--muted); border-radius: 6px; }
+.sb-ctl .btn.icon svg { width: 15px; height: 15px; }
+.sb-ctl .btn.icon:hover { background: var(--panel2); color: var(--text); }
+#btnWebToggle.on { color: var(--text); }
+.sb-tools { padding-top: 10px; }

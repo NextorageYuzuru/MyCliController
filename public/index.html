@@ -11,17 +11,17 @@
 <body>
 <div id="app">
   <aside id="sidebar">
-    <div class="sb-head">
-      <div class="brand"><img src="icon.svg" alt=""> CLI Controller</div>
-      <button id="btnNew" class="btn primary" title="新對話 (Ctrl+N)">＋ 新對話</button>
-      <button id="btnSbHide" class="btn icon" title="收起左側列表 (Ctrl+B)">«</button>
-    </div>
     <div class="sb-tools">
       <input id="search" type="search" placeholder="搜尋對話 / 資料夾…">
     </div>
     <div class="seg" id="modeSeg">
       <button id="btnSource" type="button"></button>
       <button id="btnSort" type="button"></button>
+    </div>
+    <div class="sb-ctl">
+      <button id="btnWebToggle" class="btn icon" type="button" title="顯示／隱藏瀏覽器分頁群組"><svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7.3"/><path d="M2.7 10h14.6"/><path d="M10 2.7c2.2 2.1 3.3 4.5 3.3 7.3s-1.1 5.2-3.3 7.3c-2.2-2.1-3.3-4.5-3.3-7.3S7.8 4.8 10 2.7z"/></svg></button>
+      <button id="btnNew" class="btn icon primary" type="button" title="新對話 (Ctrl+N)"><svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg></button>
+      <button id="btnSbHide" class="btn icon" type="button" title="收起左側列表 (Ctrl+B)"><svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 5L6.5 10l5 5"/><path d="M16 5l-5 5 5 5"/></svg></button>
     </div>
     <div id="sessionList"></div>
     <div class="sb-foot">

@@ -86,7 +86,7 @@ try { store = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8')); } catch {}
 store.sessions = store.sessions || {};
 store.prompts = Array.isArray(store.prompts) ? store.prompts : [];
 store.ctxWindows = store.ctxWindows || {}; // model id -> context window size, as reported by claude (result.modelUsage)
-store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '', windowTheme: 'system', folderGroups: [], folderOrder: [], sessionOrder: {}, workspaces: {}, folderColors: {} }, store.prefs);
+store.prefs = Object.assign({ model: '', effort: '', permissionMode: 'auto', groupBy: 'folder', lastCwd: '', windowTheme: 'system', folderGroups: [], folderOrder: [], sessionOrder: {}, workspaces: {}, folderColors: {}, webPages: [] }, store.prefs);
 let saveTimer = null;
 function flushStore() {
   clearTimeout(saveTimer); saveTimer = null;
@@ -860,6 +860,24 @@ $w.Close()`;
       (err, out) => resolve(((out || '').trim().split(/\r?\n/).pop() || '').trim() || null));
   });
 }
+function pickFile(initial) {
+  const ps = `
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$w = New-Object System.Windows.Forms.Form
+$w.TopMost = $true; $w.ShowInTaskbar = $false; $w.Opacity = 0; $w.StartPosition = 'CenterScreen'; $w.Show(); $w.Activate()
+$d = New-Object System.Windows.Forms.OpenFileDialog
+$d.Title = '選擇要瀏覽的網頁檔案'
+$d.Filter = '網頁檔案 (*.html;*.htm;*.svg)|*.html;*.htm;*.svg|所有檔案 (*.*)|*.*'
+if ($env:CC_INIT -and (Test-Path -LiteralPath $env:CC_INIT)) { $d.InitialDirectory = $env:CC_INIT }
+if ($d.ShowDialog($w) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }
+$w.Close()`;
+  return new Promise(resolve => {
+    execFile('powershell.exe', ['-NoProfile', '-STA', '-NonInteractive', '-EncodedCommand', psEncoded(ps)],
+      { env: { ...process.env, CC_INIT: initial || '' }, windowsHide: true, encoding: 'utf8' },
+      (err, out) => resolve(((out || '').trim().split(/\r?\n/).pop() || '').trim() || null));
+  });
+}
 // Move files/folders to the Windows Recycle Bin (recoverable), not a permanent delete.
 function toRecycleBin(paths) {
   const ps = `
@@ -957,12 +975,35 @@ async function serveStatic(p, res) {
   } catch { res.writeHead(404); res.end('not found'); }
 }
 
+const LH_TYPES = { '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav' };
+// /lh/<token>/<絕對路徑，例如 C:/Users/me/a.html>：唯讀，只送上面列的檔案類型（網頁、圖片、字型…），其他一律 415
+async function serveLocalHtml(p, req, res) {
+  const rest = p.slice(4), i = rest.indexOf('/');
+  let tok = '', raw = '';
+  try { tok = decodeURIComponent(i < 0 ? rest : rest.slice(0, i)); raw = i < 0 ? '' : decodeURIComponent(rest.slice(i + 1)); } catch { res.writeHead(400); return res.end('bad path'); }
+  if (tok !== TOKEN) { res.writeHead(401); return res.end('unauthorized'); }
+  if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
+  const fp = path.resolve(raw.replace(/\//g, '\\'));
+  if (!/^[a-zA-Z]:\\/.test(fp)) { res.writeHead(404); return res.end('not found'); } // 只收磁碟機的絕對路徑（不收網路路徑 \\host）
+  const type = LH_TYPES[path.extname(fp).toLowerCase()];
+  if (!type) { res.writeHead(415); return res.end('unsupported type'); }
+  let st; try { st = await fsp.stat(fp); } catch { res.writeHead(404); return res.end('not found'); }
+  if (!st.isFile()) { res.writeHead(404); return res.end('not found'); }
+  res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' });
+  if (req.method === 'HEAD') return res.end();
+  fs.createReadStream(fp).pipe(res);
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://localhost');
     const p = u.pathname;
     const host = String(req.headers.host || '').toLowerCase();
     if (host !== `127.0.0.1:${PORT}` && host !== `localhost:${PORT}`) { res.writeHead(403); return res.end('bad host'); }
+    if (p.startsWith('/lh/')) return serveLocalHtml(p, req, res); // 瀏覽器分頁：本機網頁檔（網址第一段是權杖，相對路徑的圖片／CSS／JS 才找得到）
     if (!p.startsWith('/api/')) return serveStatic(p, res);
     if ((req.headers['x-token'] || u.searchParams.get('t')) !== TOKEN) { res.writeHead(401); return res.end('unauthorized'); }
     const M = req.method;
@@ -1087,6 +1128,10 @@ const server = http.createServer(async (req, res) => {
           .map(g => ({ id: g.id.slice(0, 40), name: g.name.slice(0, 60), color: typeof g.color === 'string' ? g.color.slice(0, 20) : '',
             folders: Array.isArray(g.folders) ? g.folders.filter(f => typeof f === 'string').slice(0, 500) : [] }));
       }
+      if (Array.isArray(b.webPages)) { // 「瀏覽器分頁」群組裡的頁面：[{ id, path, title }]（path 空＝還沒選檔案）
+        store.prefs.webPages = b.webPages.slice(0, 100).filter(w => w && typeof w.id === 'string')
+          .map(w => ({ id: w.id.slice(0, 40), path: typeof w.path === 'string' ? w.path.slice(0, 1000) : '', title: typeof w.title === 'string' ? w.title.slice(0, 120) : '' }));
+      }
       saveStore(); return json(res, 200, { prefs: store.prefs });
     }
     let m = p.match(/^\/api\/sessions\/([0-9a-f-]{36})(?:\/(\w+))?$/i);
@@ -1117,6 +1162,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (p === '/api/pick-folder' && M === 'POST') { const b = await readBody(req); return json(res, 200, { path: await pickFolder(normPath(b.initial)) }); }
+    if (p === '/api/pick-file' && M === 'POST') { const b = await readBody(req); return json(res, 200, { path: await pickFile(normPath(b.initial)) }); }
     if (p === '/api/login' && M === 'POST') { openConsole(os.homedir(), 'claude auth login'); return json(res, 200, { ok: true }); }
     if (p === '/api/auth' && M === 'GET') return json(res, 200, { auth: await refreshAuth() });
     if (p === '/api/reveal' && M === 'POST') {

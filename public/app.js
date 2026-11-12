@@ -45,8 +45,8 @@ let btwBusy = 0;      // how many btw answers are still streaming
 // draft, transcript and scroll position. The rendering code below works on the globals S / T / tail: the state of
 // the pane being worked on is copied into them (withPane), and copied back out afterwards. The composer at the
 // bottom is shared and always shows the ACTIVE pane (the one the mouse was last pressed in).
-const PANE_KEYS = ['draft', 'cur', 'cwd', 'msgs', 'stream', 'toolEls', 'images', 'showAllMsgs', 'stick', 'ctx', 'model', 'loading', 'pending', 'attachments'];
-const newPaneState = () => ({ draft: null, cur: null, cwd: '', msgs: [], stream: '', toolEls: new Map(), images: [], showAllMsgs: false, stick: true, ctx: null, model: '', loading: false, pending: [], attachments: [], input: '' });
+const PANE_KEYS = ['web', 'draft', 'cur','cwd', 'msgs', 'stream', 'toolEls', 'images', 'showAllMsgs', 'stick', 'ctx', 'model', 'loading', 'pending', 'attachments'];
+const newPaneState = () => ({ web: null, draft: null, cur: null, cwd: '', msgs: [], stream: '', toolEls: new Map(), images: [], showAllMsgs: false, stick: true, ctx: null, model: '', loading: false, pending: [], attachments: [], input: '' });
 let T = null, tail = null;      // transcript element and live tail of the pane currently loaded into S
 let CTX = null, ACTIVE = null;  // pane currently loaded into S; pane that has the composer
 const PANE = {};                // PANE.L, PANE.R (built at the bottom of this file)
@@ -61,7 +61,13 @@ function withPane(p, fn) {
   finally { saveTo(p); loadPane(prev); }
 }
 // run fn with the active pane loaded (composer and viewer strip always belong to it)
-const inActive = fn => withPane(ACTIVE, fn);
+// 輸入區（composer）屬於哪一格：通常是 ACTIVE；但 ACTIVE 若是瀏覽器卡片（不能打字），而另一格是對話，就由那個對話格擁有（分割畫面時輸入區不會消失）
+function composerPane() {
+  if (!pst(ACTIVE).web) return ACTIVE;
+  const o = panesOn().find(p => p !== ACTIVE && !pst(p).web);
+  return o || ACTIVE;
+}
+const inActive = fn => withPane(composerPane(), fn);
 // a pane's state, whether or not it is the one loaded right now
 const pst = p => (p === CTX ? S : p.st);
 const panesOn = () => (PANE.R.el.hidden ? [PANE.L] : [PANE.L, PANE.R]);
@@ -151,11 +157,13 @@ function renderSidebar() {
     for (const [k, g] of groups) if (!placed.has(k)) units.push({ key: 'f:' + k, node: () => group('f:' + k, baseName(g.cwd) || '(未知)', g.cwd, g.items) });
     // 最上層（群組和資料夾同一位階）照使用者拖出來的順序；沒排過的維持原本順序、排在後面
     const ord = Array.isArray(S.prefs.folderOrder) ? S.prefs.folderOrder : [];
-    units.forEach((u, i) => { const o = ord.indexOf(u.key); u.rank = o >= 0 ? o : 1e6 + i; });
+    if (S.webShown) units.push({ key: WEB_KEY, node: () => webUnit() });
+    units.forEach((u, i) => { const o = ord.indexOf(u.key); u.rank = o >= 0 ? o : u.key === WEB_KEY ? -1 : 1e6 + i; }); // 瀏覽器分頁群組沒排過就放最上面
     units.sort((a, b) => a.rank - b.rank);
     S.topKeys = units.map(u => u.key);
     units.forEach(u => list.append(u.node()));
   }
+  if (S.webShown && (S.prefs.groupBy === 'flat' || S.prefs.groupBy === 'time')) list.prepend(webUnit()); // 其他排列方式：瀏覽器分頁群組固定在最上面
   if (!ss.length) list.append(el('div', { class: 'empty muted' }, S.sessions.length ? '沒有符合的對話' : '還沒有對話，按「＋ 新對話」開始'));
   const ri = list.querySelector('.renameIn'); if (ri) { ri.focus(); const n = ri.value.length; try { ri.setSelectionRange(n, n); } catch {} }
 }
@@ -201,6 +209,16 @@ function dropPos(e, node, allowInto) {
   return y < 0.5 ? 'before' : 'after';
 }
 function planDrop(src, tgt, e, node) {
+  if (tgt.type === 'webgroup') { // 瀏覽器分頁群組：只能跟別的最上層區塊換前後位置，不能被放進去、也不能放進別人裡面
+    const pos = dropPos(e, node);
+    if (src.type === 'group') return { act: 'top', skey: 'g:' + src.key, tkey: WEB_KEY, pos };
+    if (src.type === 'folder') return { act: 'top', skey: 'f:' + src.key, tkey: WEB_KEY, pos, ungroup: src.key };
+    return null;
+  }
+  if (src.type === 'webgroup') {
+    const tkey = tgt.type === 'group' ? 'g:' + tgt.key : tgt.type === 'folder' ? (tgt.gid ? 'g:' + tgt.gid : 'f:' + tgt.key) : null;
+    return tkey ? { act: 'top', skey: WEB_KEY, tkey, pos: dropPos(e, node) } : null;
+  }
   if (src.type === 'wsession') { // 專注模式：工作群
     if (src.virtual) return tgt.type === 'wsession' && tgt.gid === src.gid && tgt.sid !== src.sid ? { act: 'winto', sid: src.sid, gid: src.gid, tsid: tgt.sid, pos: dropPos(e, node) } : null; // 空白卡片只能在自己的群裡換位置
     if (tgt.type === 'wsession') {
@@ -326,6 +344,110 @@ function newFolderGroup(key) {
 }
 function moveFolderToGroup(key, gid) { // gid = null → 移出群組
   saveFolderGroups(folderGroups().map(g => ({ ...g, folders: g.id === gid ? [...g.folders.filter(k => k !== key), key] : g.folders.filter(k => k !== key) })));
+}
+// ---- 瀏覽器分頁群組：永遠只有一個、永遠在最上層，不能合併／加入別的群組或資料夾；裡面放「瀏覽器卡片」（本機 HTML 頁面）----
+// 名稱固定、顏色固定（不跟資料夾／群組的色盤重複）。頁面存在 prefs.webPages（[{ id, path, title }]），畫面顯示在窗格裡（左／右分割都可以）。
+const WEB_KEY = 'b:web', WEB_COLOR = '#a6c630', WEB_NAME = '瀏覽器分頁';
+const webPages = () => (Array.isArray(S.prefs.webPages) ? S.prefs.webPages : []);
+const webLabel = w => w.title || (w.path ? baseName(w.path) : '新分頁');
+const webShownIn = id => panesOn().filter(p => pst(p).web === id);
+function saveWebPages(arr) {
+  S.prefs.webPages = arr; renderSidebar();
+  api('POST', '/api/prefs', { webPages: arr }).catch(e => toast('儲存瀏覽器分頁失敗: ' + e.message));
+}
+// 使用者貼進來的可能是：本機路徑、帶引號的路徑、file:///C:/…/%E4%BF%AE….html 這種「百分比編碼」的檔案網址（從瀏覽器網址列複製來的）、http(s) 網址。
+// file:// 網址要先解碼（%E4%BF%AE→修、%20→空白）並轉成一般 Windows 路徑，否則後面再編碼一次就變成 %25E4…，找不到檔案。
+function webNormPath(raw) {
+  let v = String(raw || '').trim().replace(/^"|"$/g, '');
+  if (/^file:\/\//i.test(v)) {
+    v = v.replace(/[?#].*$/, ''); // 只送檔案本身：去掉 ?query／#錨點
+    try { v = decodeURIComponent(v); } catch {}
+    v = v.replace(/^file:\/\/(localhost)?\/?/i, '').replace(/\//g, '\\');
+  }
+  return v;
+}
+function webSrc(w) { // 本機路徑 → 後端的 /lh/ 唯讀檔案服務；http(s) 網址（例如 localhost 開發中的頁面）原樣用
+  const v = webNormPath(w.path); if (!v) return '';
+  if (/^https?:\/\//i.test(v)) return v;
+  return `/lh/${encodeURIComponent(TOKEN)}/` + v.replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/');
+}
+function webAdd() {
+  const w = { id: 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), path: '', title: '' };
+  S.collapsed.delete(WEB_KEY); ls('cc_collapsed', JSON.stringify([...S.collapsed]));
+  saveWebPages([...webPages(), w]); openWeb(w.id);
+}
+function webSet(id, patch_) { saveWebPages(webPages().map(w => (w.id === id ? { ...w, ...patch_ } : w))); for (const p of webShownIn(id)) withPane(p, () => { renderHead(); renderTranscript(); }); }
+async function webPick(id) {
+  const w = webPages().find(x => x.id === id); if (!w) return;
+  const d = await api('POST', '/api/pick-file', { initial: w.path && !/^https?:/i.test(w.path) ? w.path.replace(/[\\/][^\\/]*$/, '') : '' }).catch(e => (toast(e.message), {}));
+  if (d.path) webSet(id, { path: d.path, title: baseName(d.path) });
+}
+function webClose(id) {
+  for (const p of webShownIn(id)) withPane(p, () => newDraft(S.focusKey ? S.focusCwd : ''));
+  saveWebPages(webPages().filter(w => w.id !== id));
+}
+function webGroupMenu(x, y) { showMenu(x, y, [['＋ 新增頁面', () => webAdd()]]); }
+function webPageMenu(w, x, y) {
+  const inR = !PANE.R.el.hidden && pst(PANE.R).web === w.id;
+  showMenu(x, y, [
+    ['📂 選擇檔案…', () => webPick(w.id)],
+    ['⟳ 重新整理', () => { for (const p of webShownIn(w.id)) withPane(p, renderTranscript); }],
+    ['✎ 重新命名', () => { const t = prompt('頁面名稱', webLabel(w)); if (t != null && t.trim()) webSet(w.id, { title: t.trim() }); }],
+    [inR ? '✕ 取消右側分割' : '⫽ 放到右側分割視窗', () => (inR ? closeRight() : openWebRight(w.id))],
+    ...(w.path && !/^https?:/i.test(w.path) ? [['📁 在檔案總管顯示', () => reveal(w.path)]] : []),
+    ['✕ 關閉這個頁面', () => webClose(w.id), 'danger'],
+  ]);
+}
+// 開在某個窗格：這格改成顯示瀏覽器卡片（不是對話）
+function openWeb(id, p = ACTIVE) {
+  const shown = webShownIn(id)[0];
+  if (shown && p === ACTIVE) { setActive(shown); return; }
+  withPane(p, () => {
+    S.draft = null; S.cur = null; S.web = id; S.msgs = []; S.ctx = null; S.model = ''; S.cwd = ''; S.loading = false; S.pending = [];
+    renderCtx(); renderSidebar(); renderHead(); renderTranscript(); refreshComposer();
+  });
+  if (p !== ACTIVE) setActive(p);
+}
+function openWebMain(id) {
+  const shown = webShownIn(id)[0];
+  if (shown) { setActive(shown); return; }
+  if (ACTIVE !== PANE.L) setActive(PANE.L);
+  openWeb(id, PANE.L);
+}
+function openWebRight(id) {
+  if (webShownIn(id).includes(PANE.L)) { toast('這個頁面已經在左側開著'); return; }
+  const R = PANE.R;
+  if (R.el.hidden) { R.el.hidden = false; updateSplit(); }
+  openWeb(id, R); setActive(R);
+}
+// 窗格裡的瀏覽器卡片：上面一條網址／路徑列（可貼本機路徑或 http://localhost:…），下面是頁面（iframe，沙盒：頁面碰不到這個程式）
+function renderWeb() {
+  const w = webPages().find(x => x.id === S.web), p = CTX;
+  T.innerHTML = '';
+  if (!w) { T.append(el('div', { class: 'empty muted' }, '這個頁面已經不存在')); return; }
+  const addr = el('input', { type: 'text', class: 'webaddr', value: w.path, spellcheck: 'false', placeholder: '貼上本機 HTML 檔案路徑（或 http://localhost:… 網址），按 Enter 開啟' });
+  addr.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); const v = webNormPath(addr.value); webSet(w.id, { path: v, title: v ? (/^https?:/i.test(v) ? v.replace(/^https?:\/\//i, '') : baseName(v)) : '' }); } };
+  // 縮放：很多網頁是為整個螢幕寬度設計的，放在半格（分割畫面）裡寬度不夠，會跳到「窄版／手機版」排版而錯亂。
+  // 所以讓頁面以「虛擬寬度」排版（寬度＝格寬÷縮放比），再整個縮小顯示。「自動」＝至少用 1280px 寬排版，格子比較窄時自動縮小。每個頁面各記一個設定。
+  const zk = 'cc_webzoom_' + w.id, zoomSel = el('select', { class: 'webzoom', title: '縮放（頁面排版版面不對時，可以調小讓它用桌面版面）' },
+    ...[['auto', '自動'], ['1', '100%'], ['0.9', '90%'], ['0.8', '80%'], ['0.7', '70%'], ['0.6', '60%'], ['0.5', '50%']].map(([v, t]) => el('option', { value: v }, t)));
+  zoomSel.value = ls(zk) || 'auto'; if (zoomSel.value !== (ls(zk) || 'auto')) zoomSel.value = 'auto';
+  const bar = el('div', { class: 'webbar' }, addr, zoomSel,
+    el('button', { class: 'btn small', title: '選擇檔案', onclick: () => webPick(w.id) }, '📂'),
+    el('button', { class: 'btn small', title: '重新整理', onclick: () => withPane(p, renderTranscript) }, '⟳'));
+  const src = webSrc(w);
+  if (!src) { T.append(bar, el('div', { class: 'webempty muted' }, '還沒有內容：在上面貼路徑，或按 📂 選擇一個 HTML 檔案。')); return; }
+  // 本機檔案（/lh/，和這個程式同源）不給 allow-same-origin，頁面碰不到這個程式；http(s) 網址是別的來源（不同連線埠），要給才能正常打自己的 API／存 localStorage
+  const frame = el('iframe', { class: 'webframe', src, sandbox: 'allow-scripts allow-forms allow-popups allow-modals allow-downloads' + (/^https?:\/\//i.test(src) ? ' allow-same-origin' : '') });
+  const view = el('div', { class: 'webview' }, frame);
+  const fit = () => {
+    const cw = view.clientWidth, ch = view.clientHeight; if (!cw || !ch) return;
+    const m = zoomSel.value, z = m === 'auto' ? Math.min(1, cw / 1280) : Number(m) || 1;
+    frame.style.width = Math.ceil(cw / z) + 'px'; frame.style.height = Math.ceil(ch / z) + 'px'; frame.style.transform = z === 1 ? '' : `scale(${z})`;
+  };
+  zoomSel.onchange = () => { ls(zk, zoomSel.value); fit(); };
+  T.append(bar, view);
+  new ResizeObserver(fit).observe(view); fit();
 }
 // ---- 專注模式：把一個資料夾做成「獨立工作區副本」----
 // 進入後：只剩這個資料夾；資料夾卡片只能退出；不能開這個資料夾以外的對話；對話可以多組一層「工作群」。
@@ -585,6 +707,7 @@ function renderFocusSidebar(list, ss) {
   }
   if (!ss.length) body.append(el('div', { class: 'empty muted' }, '這個資料夾目前沒有（符合條件的）對話，可以按上面的 ＋ 開新對話'));
   list.append(body);
+  if (S.webShown) list.append(webUnit()); // 專注模式也跟進來：永遠在第一層的一個群組
 }
 function folderMenu(cwd, x, y) {
   const key = folderKey(cwd), cur = groupOfFolder(key);
@@ -629,6 +752,29 @@ function userGroup(fg, folders) {
     box.append(body);
   }
   return box;
+}
+// 側欄的瀏覽器分頁群組：┌ 括弧樣式（同資料夾），固定的地球圖示、名稱、顏色
+function webUnit() {
+  const collapsed = S.collapsed.has(WEB_KEY), pages = webPages();
+  const g = el('div', { class: 'group gbracket webgroup' + (collapsed ? ' collapsed' : ''), style: '--bk:' + WEB_COLOR });
+  const head = el('div', { class: 'ghead', title: '右鍵：新增頁面' },
+    el('span', { class: 'glabel' }, '🌐 ' + WEB_NAME), el('span', { class: 'gn' }, '(' + pages.length + ')'),
+    el('button', { class: 'gadd', title: '新增一個頁面', onclick: e => { e.stopPropagation(); webAdd(); } }, '＋'));
+  head.onclick = () => { collapsed ? S.collapsed.delete(WEB_KEY) : S.collapsed.add(WEB_KEY); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
+  head.oncontextmenu = e => { e.preventDefault(); webGroupMenu(e.clientX, e.clientY); };
+  if (!S.focusKey) dndWire(head, { type: 'webgroup', key: WEB_KEY });
+  g.append(head);
+  if (!collapsed) {
+    for (const w of pages) {
+      const d = el('div', { class: 'sitem' + (webShownIn(w.id).length ? ' active' : ''), title: w.path || '（還沒選檔案）' },
+        el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, '🌐 ' + webLabel(w))));
+      d.onclick = () => openWebMain(w.id);
+      d.oncontextmenu = e => { e.preventDefault(); webPageMenu(w, e.clientX, e.clientY); };
+      g.append(d);
+    }
+    if (!pages.length) g.append(el('div', { class: 'more muted' }, '（空的：右鍵 → 新增頁面）'));
+  }
+  return g;
 }
 function group(key, label, cwd, items, showFolder, gid) {
   const collapsed = S.collapsed.has(key);
@@ -746,9 +892,10 @@ async function loadSessions() {
 function renderHeads() { for (const p of panesOn()) withPane(p, renderHead); }
 function renderHead() {
   const s = curSession(), h = CTX.hdr, draft = !!S.draft;
-  h.title.textContent = draft ? '新對話' : s ? dispTitle(s) : '';
-  h.cwd.textContent = S.cwd ? S.cwd : '';
-  h.cwd.hidden = !S.cwd;
+  const w = S.web ? webPages().find(x => x.id === S.web) : null;
+  h.title.textContent = S.web ? '🌐 ' + (w ? webLabel(w) : '') : draft ? '新對話' : s ? dispTitle(s) : '';
+  h.cwd.textContent = S.web ? '' : S.cwd ? S.cwd : '';
+  h.cwd.hidden = S.web || !S.cwd;
   h.model.textContent = S.model ? '· ' + S.model : '';
   // 視窗最上面那條（Windows 標題列／工作列）永遠顯示軟體名稱，不跟著切換對話變動（頁面 <title> 固定）
 }
@@ -815,7 +962,7 @@ $('#selEffort').onchange = () => onCfgChange('effort', $('#selEffort').value);
 $('#selPerm').onchange = () => onCfgChange('permissionMode', $('#selPerm').value);
 
 const input = $('#input');
-function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, innerHeight * 0.4) + 'px'; }
+function autosize() { if ($('#composer').hidden) return; input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, innerHeight * 0.4) + 'px'; }
 input.addEventListener('input', autosize);
 input.addEventListener('keydown', e => {
   if (cmd.open && cmdKey(e)) return;
@@ -918,7 +1065,7 @@ function renderComposerState() {
   });
 }
 // everything the composer shows for the active pane
-function refreshComposer() { inActive(() => { syncSelectors(); renderCtxActive(); renderAttachments(); renderComposerState(); }); }
+function refreshComposer() { inActive(() => { $('#composer').hidden = !!S.web; syncSelectors(); renderCtxActive(); renderAttachments(); renderComposerState(); if (!S.web) autosize(); }); } // 輸入框藏起來時量到的高度是 0：重新顯示後要重算，否則會縮成一條細線
 
 // ---------- message queue ----------
 // While Claude works, sent messages wait here (per session) and go out by themselves when the turn ends.
@@ -975,7 +1122,7 @@ function renderQueueActive() {
 // ---------- new session (draft) ----------
 // new conversation in the pane that is loaded (the active one, unless called through withPane)
 function newDraft(cwd) {
-  S.draft = { }; S.cur = null; S.msgs = []; S.model = ''; S.ctx = null;
+  S.web = null; S.draft = { }; S.cur = null; S.msgs = []; S.model = ''; S.ctx = null;
   S.cwd = S.focusKey ? S.focusCwd : (cwd || S.prefs.lastCwd || ''); // 專注模式：新對話一律開在這個資料夾
   renderSidebar(); renderHead(); renderTranscript(); refreshComposer();
   if (CTX === ACTIVE) input.focus();
@@ -1006,7 +1153,7 @@ async function openSession(id, p = ACTIVE) {
 
   if (S.focusKey && !inFocusFolder(id)) { toast('專注模式中只能開啟這個資料夾的對話（要看別的請先退出專注模式）'); return; }
   withPane(p, () => {
-    S.draft = null; S.cur = id; S.cwd = (curSession() || {}).cwd || ''; S.model = ''; S.ctx = null;
+    S.web = null; S.draft = null; S.cur = id; S.cwd = (curSession() || {}).cwd || ''; S.model = ''; S.ctx = null;
     if (p === ACTIVE) ls('cc_last', id);
     if (UNREAD.delete(id)) saveUnread();
     renderCtx(); renderSidebar(); renderHead(); refreshComposer();
@@ -1044,6 +1191,8 @@ async function openSession(id, p = ACTIVE) {
 function renderTranscript() {
   T.innerHTML = ''; S.toolEls.clear(); S.images = [];
   tail = el('div', { class: 'tail' }, el('div', { class: 'atext md stream' }), el('div', { class: 'permBox' }), el('div', { class: 'working' }));
+  T.classList.toggle('web', !!S.web);
+  if (S.web) { renderWeb(); return; }
   if (S.draft) { renderDraft(); renderSideCards(); renderStrip(); return; }
   const msgs = S.msgs, LIMIT = 300;
   const start = S.showAllMsgs ? 0 : Math.max(0, msgs.length - LIMIT);
@@ -1951,6 +2100,11 @@ document.addEventListener('keydown', e => {
 
 // ---------- misc ----------
 $('#btnNew').onclick = () => newDraft();
+// 顯示／隱藏「🌐 瀏覽器分頁」群組（左側列表、專注模式、橫向分頁列都跟著；只是藏起來，頁面資料不動）
+S.webShown = ls('cc_showweb') !== '0';
+function renderWebToggle() { const b = $('#btnWebToggle'); b.classList.toggle('on', S.webShown); b.title = S.webShown ? '隱藏瀏覽器分頁群組' : '顯示瀏覽器分頁群組'; }
+$('#btnWebToggle').onclick = () => { S.webShown = !S.webShown; ls('cc_showweb', S.webShown ? '1' : '0'); renderWebToggle(); renderSidebar(); };
+renderWebToggle();
 $('#btnNewRail').onclick = () => newDraft();
 // 整頁縮進去：收起左側列表，右側（對話區）就多出整個寬度；收起時 » 上的小點代表還有黃／藍點的對話
 function applySidebar(collapsed, init) {
@@ -2004,7 +2158,8 @@ function tabStructure() {
   }
   for (const [k, g] of groups) if (!placed.has(k)) units.push({ key: 'f:' + k, folder: [k, g] });
   const ord = Array.isArray(S.prefs.folderOrder) ? S.prefs.folderOrder : [];
-  units.forEach((u, i) => { const o = ord.indexOf(u.key); u.rank = o >= 0 ? o : 1e6 + i; });
+  if (S.webShown) units.push({ key: WEB_KEY, web: true });
+  units.forEach((u, i) => { const o = ord.indexOf(u.key); u.rank = o >= 0 ? o : u.key === WEB_KEY ? -1 : 1e6 + i; });
   units.sort((a, b) => a.rank - b.rank);
   S.topKeys = units.map(u => u.key);
   return { pinned, units };
@@ -2074,6 +2229,23 @@ function renderTabs() {
     if (!collapsed) u.folders.forEach(f => wrap.append(folderUnit(f, fg.id)));
     return wrap;
   };
+  const webTabUnit = () => { // 橫向分頁列的瀏覽器分頁群組（括弧樣式）
+    const collapsed = S.collapsed.has(WEB_KEY), pages = webPages();
+    const wrap = el('div', { class: 'tfold tbr webgroup' + (collapsed ? ' collapsed' : ''), style: '--bk:' + WEB_COLOR });
+    const chip = el('div', { class: 'tchip tfbr', title: '右鍵：新增頁面' }, el('span', { class: 'ttl' }, '🌐 ' + WEB_NAME), el('span', { class: 'tn' }, '(' + pages.length + ')'));
+    chip.onclick = toggle(WEB_KEY);
+    chip.oncontextmenu = e => { e.preventDefault(); webGroupMenu(e.clientX, e.clientY); };
+    if (!S.focusKey) { dndWire(chip, { type: 'webgroup', key: WEB_KEY }); chip.__block = wrap; }
+    wrap.append(chip);
+    if (!collapsed) for (const w of pages) {
+      const sp = webShownIn(w.id)[0];
+      const d = el('div', { class: 'tab' + (sp === ACTIVE ? ' cur' : sp ? ' side' : ''), title: w.path || '（還沒選檔案）' }, el('span', { class: 'ttl' }, '🌐 ' + webLabel(w)));
+      d.onclick = () => openWebMain(w.id);
+      d.oncontextmenu = e => { e.preventDefault(); webPageMenu(w, e.clientX, e.clientY); };
+      wrap.append(d);
+    }
+    return wrap;
+  };
   const left = $('#tabShort'), right = $('#tabScroll');
   left.innerHTML = ''; right.innerHTML = '';
   // 1) 左區（固定）：兩張捷徑虛擬卡片（沒有右鍵功能，只有左鍵跳回去）
@@ -2090,7 +2262,7 @@ function renderTabs() {
   }
   if (!anyV) left.append(el('div', { class: 'tshint', title: '在主／副視窗真的說話過的對話，會在這裡放一張捷徑卡，點一下跳回去' }, '主／副 捷徑'));
   // 2) 右區：Web 分頁式——還沒開始說話的新對話（草稿）
-  for (const p of panesOn()) if ((pst(p).draft && !pst(p).draft.vid) || !pst(p).cur && !pst(p).draft) {
+  for (const p of panesOn()) if (!pst(p).web && ((pst(p).draft && !pst(p).draft.vid) || !pst(p).cur && !pst(p).draft)) {
     const d = el('div', { class: 'tab' + (p === ACTIVE ? ' cur' : ' side') }, el('span', { class: 'ttl' }, '＋ 新對話'));
     d.onclick = () => setActive(p); right.append(d);
   }
@@ -2113,6 +2285,7 @@ function renderTabs() {
       if (!collapsed) u.group.items.forEach(s => wrap.append(sessionTab(s, null, g.id)));
       right.append(wrap);
     }
+    if (S.webShown) right.append(webTabUnit());
     return;
   }
   // 3) 釘選、群組、資料夾（同左側列表）
@@ -2123,7 +2296,7 @@ function renderTabs() {
     if (!collapsed) st.pinned.forEach(s => wrap.append(sessionTab(s, null)));
     right.append(wrap);
   }
-  for (const u of st.units) right.append(u.fg ? groupUnit(u) : folderUnit(u.folder, null));
+  for (const u of st.units) right.append(u.web ? webTabUnit() : u.fg ? groupUnit(u) : folderUnit(u.folder, null));
 }
 $('#tabScroll').addEventListener('wheel', e => { const b = e.currentTarget; if (b.scrollWidth > b.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) { b.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
 $('#btnTabs').onclick = () => { S.tabsOn = !S.tabsOn; ls('cc_tabs', S.tabsOn ? '1' : '0'); renderTabs(); btwRepos(); };
@@ -2432,11 +2605,12 @@ function updateSplit() {
 function setActive(p) {
   if (p === ACTIVE || p.el.hidden) return;
   const old = ACTIVE;
-  old.st.input = input.value; // keep what was typed in the pane we leave
+  const keepText = !!(pst(old).web || p.st.web); // 其中一格是瀏覽器：輸入框的字是屬於另一格對話的，不要存進／換掉
+  if (!keepText) old.st.input = input.value; // keep what was typed in the pane we leave
   saveTo(old);
   closeCmd(); closePop();
   ACTIVE = p; loadPane(p);
-  input.value = p.st.input || ''; autosize();
+  if (!keepText) { input.value = p.st.input || ''; autosize(); }
   if (S.cur && !S.draft) ls('cc_last', S.cur);
   if (S.cur && UNREAD.delete(S.cur)) { saveUnread(); renderSidebar(); }
   renderTabs();
@@ -2445,7 +2619,7 @@ function setActive(p) {
   // 分割視窗下切換焦點：btw 小視窗是綁在「開啟它的那一格」，不跟焦點走。切到別的格 = 當作取消，直接關掉
   // （AI 還在回答中就先留著，讓答案跑完；切回原來那格會看到）。
   if (btwPop && !btwPop.hidden && btwPane && p !== btwPane && !btwBusy) btwCancel();
-  input.focus();
+  if (!pst(p).web) input.focus(); // 瀏覽器卡片：不要把焦點搶去輸入框（網址列要能打字）
 }
 // 跟主視窗互換：右邊這格變成主視窗（L）、原本的主視窗變成副視窗（R）。只換位置，內容、捲動位置、草稿都留在各自那格
 function swapPanes() {
@@ -2480,6 +2654,11 @@ function closeRight() {
   updateSplit(); renderTabs();
 }
 
+// 右側（或任何一格）是瀏覽器卡片、焦點在它身上時，點到下方輸入區／在輸入框打字：自動把焦點鎖回有對話的那一格
+function lockToChat() { if (pst(ACTIVE).web) { const q = composerPane(); if (q !== ACTIVE) setActive(q); } }
+$('#composer').addEventListener('mousedown', lockToChat, true);
+input.addEventListener('focus', lockToChat);
+input.addEventListener('input', lockToChat);
 PANE.L = buildPane('L');
 PANE.R = buildPane('R');
 PANE.R.el.hidden = true;
