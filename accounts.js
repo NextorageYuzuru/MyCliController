@@ -261,7 +261,7 @@ module.exports = function createAccounts({ store, saveStore, log, broadcast, cle
   }
 
   return {
-    MAIN, active, env, view, label, fullName, status, rate: id => rates[id] || null, rates: () => rates,
+    MAIN, active, exists: valid, env, view, label, fullName, status, rate: id => rates[id] || null, rates: () => rates,
     onRate, onError, onSuccess, onCliAuth, refreshRate, add, remove, rename, use,
   };
 };

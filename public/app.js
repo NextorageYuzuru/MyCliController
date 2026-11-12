@@ -1092,11 +1092,23 @@ async function send(override) {
     }
     if (useInput) clearComposerOf(p);
     withPane(p, () => { S.stick = true; });
-    await api('POST', `/api/sessions/${id}/send`, { text, images });
+    await api('POST', `/api/sessions/${id}/send`, { text, images, compactFirst: await askCompactFirst(id) });
   } catch (e) { toast('送出失敗: ' + e.message, 6000); }
   finally { $('#btnSend').disabled = false; input.focus(); }
 }
 $('#btnSend').onclick = () => send();
+// A long conversation that last ran on another account: offer to compact it there first (that account still has
+// it cached and pays for it), so the account in use only reads a short summary. The server decides when to offer.
+async function askCompactFirst(id) {
+  let c; try { c = await api('GET', `/api/sessions/${id}/compactcheck`); } catch { return false; }
+  if (!c || !c.suggest) return false;
+  const k = Math.round(c.tokens / 1000), ago = c.lastAt ? Math.max(1, Math.round((Date.now() - c.lastAt) / 60000)) : null;
+  return confirm(`這段對話上次是用${c.from}執行的，目前上下文約 ${k}k tokens。\n` +
+    `直接用${c.to}接著聊，第一則訊息會讓${c.to}重新讀取整段上下文，比平常吃更多額度。\n\n` +
+    `要先用${c.from}自動壓縮（/compact）再送出嗎？\n\n` +
+    `・確定：先用${c.from}壓縮（用的是${c.from}的額度；它 ${ago || '?'} 分鐘前才用過這段對話，還有快取，比較便宜），完成後自動用${c.to}送出你的訊息。壓縮會讓 Claude 只記得重點摘要\n` +
+    `・取消：不壓縮，直接用${c.to}送出`);
+}
 $('#btnStop').onclick = () => S.cur && api('POST', `/api/sessions/${S.cur}/stop`).catch(e => toast(e.message));
 function renderComposerState() {
   inActive(() => {

@@ -374,7 +374,8 @@ function cleanEnv() {
 function setActivity(run, text) { run.activity = text; broadcast({ type: 'activity', sid: run.id, text }); }
 function writeCtl(run, obj) { try { run.proc.stdin.write(JSON.stringify(obj) + '\n'); } catch {} }
 
-async function sendMessage(id, text, images) {
+// opts.acct: start claude on this account instead of the one in use (used to compact on the previous account)
+async function sendMessage(id, text, images, opts = {}) {
   const r = rec(id);
   if (!r.cwd) r.cwd = sessionCwd(id);
   if (!r.cwd || !fs.existsSync(r.cwd)) throw new Error('工作資料夾不存在: ' + (r.cwd || '(未設定)'));
@@ -415,7 +416,8 @@ async function sendMessage(id, text, images) {
     return;
   }
   const fp = await findFile(id);
-  const acct = ACC.active(), env = await ACC.env(acct);
+  const acct = opts.acct || ACC.active(), env = await ACC.env(acct);
+  r.lastAcct = acct; r.lastAcctAt = Date.now(); // which account this conversation last ran on (see compactCheck)
   const exists = !!fp && fs.existsSync(fp);
   const startOffset = exists ? (await fsp.stat(fp)).size : 0;
   // --replay-user-messages: claude echoes each message we write once it actually takes it in, so we know when
@@ -634,6 +636,7 @@ function handleLine(run, line) {
       run.perms.delete(o.request_id); broadcast({ type: 'permDone', sid, requestId: o.request_id }); return;
     case 'result': {
       run.gotResult = true; run.partial = '';
+      rec(run.id).lastAcctAt = Date.now(); // its prompt cache on this account is fresh from here
       // (total_cost_usd is deliberately not passed on: on a Max plan the dollar figure means nothing)
       const res = { isError: !!o.is_error, subtype: o.subtype, durationMs: o.duration_ms, usage: o.usage,
         text: o.is_error ? (o.result || (o.errors || []).join('\n') || o.subtype || '') : '' };
@@ -775,6 +778,45 @@ async function getMessages(id) {
   else { const fp = await findFile(id); if (fp) ({ messages, ctx } = await loadTranscript(fp)); }
   return { messages, ctx: withWindow(id, ctx), running: !!(run && run.turnActive), partial: run ? run.partial : '', activity: run ? run.activity : '', startedAt: run ? run.startedAt : null,
     perms: run ? [...run.perms.values()] : [], cwd: sessionCwd(id) };
+}
+
+// ---------- compact on the previous account before continuing on another one ----------
+// Continuing a long conversation on another account makes that account read the whole context once (the prompt
+// cache belongs to the account it was built on). Compacting first on the account the conversation last ran on —
+// while that one still has quota — leaves only a short summary for the new account to read.
+// Offered only when: nothing is running in it, it last ran here on a different account that is usable and not
+// (nearly) out of quota, and its context is long. Unknown history (e.g. started in the CLI) → not offered.
+const COMPACT_MIN = 60000; // tokens of context below which compacting is not worth asking about
+// How long the previous account keeps the conversation in its prompt cache. Past this, compacting there means a full
+// re-read on that account too, so it is not offered. Claude Code on a subscription uses a 1-hour cache (5 minutes on
+// some setups); 1 hour is used so a still-cached conversation is never skipped.
+const CACHE_TTL_MS = 60 * 60000;
+async function compactCheck(id) {
+  const no = { suggest: false };
+  const r = store.sessions[id], run = runs.get(id);
+  if (!r || (run && !run.exited)) return no;
+  const from = r.lastAcct, to = ACC.active();
+  if (!from || from === to || !ACC.exists(from) || ACC.status(from).code !== 'ok') return no;
+  if (!r.lastAcctAt || Date.now() - r.lastAcctAt > CACHE_TTL_MS) return no; // its cache has expired: nothing to save
+  const rt = ACC.rate(from), wins = rt && (rt.unifiedWindows || {});
+  if (wins && Object.values(wins).some(w => w && (w.status === 'rejected' || (w.utilization >= 0.97 && !(w.resetsAt && w.resetsAt * 1000 < Date.now()))))) return no;
+  const fp = await findFile(id); if (!fp) return no;
+  const { ctx } = await loadTranscript(fp);
+  if (!ctx || !ctx.used || ctx.used < COMPACT_MIN) return no;
+  return { suggest: true, from: ACC.fullName(from), to: ACC.fullName(to), fromId: from, tokens: ctx.used, lastAt: r.lastAcctAt || null };
+}
+// Compact on the previous account, then send the message on the account in use (queued in afterExit: it goes out
+// when the compacting claude has exited, whether compacting worked or not).
+async function sendWithCompact(id, text, images) {
+  const c = await compactCheck(id);
+  if (!c.suggest) return sendMessage(id, text, images);
+  log('compact before switch', id, c.from, '->', c.to, c.tokens);
+  await sendMessage(id, '/compact', [], { acct: c.fromId });
+  const run = runs.get(id);
+  if (!run || run.exited) return sendMessage(id, text, images);
+  run.afterExit.push({ text, images });
+  broadcast({ type: 'notice', sid: id, text: `先用${c.from}壓縮這段對話（約 ${Math.round(c.tokens / 1000)}k tokens），完成後會自動用${c.to}送出你的訊息` });
+  return { compacting: true };
 }
 
 // ---------- OS helpers ----------
@@ -1153,9 +1195,11 @@ const server = http.createServer(async (req, res) => {
       if (act === 'messages' && M === 'GET') return json(res, 200, await getMessages(id));
       if (act === 'send' && M === 'POST') {
         const b = await readBody(req);
-        const r = await sendMessage(id, String(b.text || ''), Array.isArray(b.images) ? b.images : []);
+        const imgs = Array.isArray(b.images) ? b.images : [];
+        const r = b.compactFirst ? await sendWithCompact(id, String(b.text || ''), imgs) : await sendMessage(id, String(b.text || ''), imgs);
         return json(res, 200, { ok: true, ...(r || {}) });
       }
+      if (act === 'compactcheck' && M === 'GET') return json(res, 200, await compactCheck(id));
       if (act === 'stop' && M === 'POST') return json(res, 200, { ok: stopRun(id) });
       if (act === 'perm' && M === 'POST') { const b = await readBody(req); return json(res, 200, { ok: answerPerm(id, b.requestId, b) }); }
       if (act === 'terminal' && M === 'POST') {
