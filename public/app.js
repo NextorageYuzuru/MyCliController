@@ -1262,8 +1262,31 @@ function renderTranscript() {
 }
 function insert(node) { T.insertBefore(node, tail); }
 
+// Claude Code's notices about background work (subagents, background commands, Monitor events): one small card each,
+// details folded away. A subagent stopped by the account's quota gets a plain explanation of what to do.
+const TASK_ST = { completed: ['✓', '完成', 'ok'], failed: ['✕', '失敗', 'err'], killed: ['■', '已停止', ''], stopped: ['■', '已停止', ''] };
+const TASK_LIMIT_RE = /rate.?limit|hit your [\w -]*limit|usage limit|\b429\b/i;
+function taskCard(n) {
+  const [icon, word, cls] = TASK_ST[n.status] || ['ⓘ', n.status ? n.status : '通知', ''];
+  const agent = (n.summary.match(/Agent "([^"]+)"/) || [])[1];
+  const limit = n.status === 'failed' && TASK_LIMIT_RE.test(n.summary);
+  let head;
+  if (limit) {
+    const reset = (n.summary.match(/resets ([^·)]*\)?)/) || [])[1];
+    head = `${agent ? `背景子代理「${agent}」` : '背景工作'}因帳號額度用完而中止` + (reset ? `（${reset.trim()} 重置）` : '');
+  } else head = n.summary || n.event || '背景工作通知';
+  const card = el('details', { class: 'tasknote ' + cls + (limit ? ' limit' : '') },
+    el('summary', null, el('span', { class: 'tnicon' }, icon), el('span', { class: 'tnword' }, word), el('span', { class: 'tnhead' }, head)),
+    limit ? el('div', { class: 'tnhelp' }, '它到目前為止的進度有保存。額度恢復後（或在左下切換到其他帳號後），跟 Claude 說「繼續」，它會讓這個子代理接著做；不用重新開始。') : null,
+    n.event && n.summary ? el('div', { class: 'tnrow' }, el('b', null, '事件　'), n.event) : null,
+    n.result ? el('div', { class: 'tnrow' }, el('b', null, '最後狀態　'), n.result) : null,
+    limit || n.summary !== head ? el('div', { class: 'tnrow muted' }, el('b', null, '原始訊息　'), n.summary) : null,
+    n.id ? el('div', { class: 'tnrow muted small' }, 'task-id: ' + n.id) : null);
+  return card;
+}
 function appendMsg(m) {
   if (m.role === 'system') { insert(el('div', { class: 'sysline muted' }, m.text)); return; }
+  if (m.role === 'task') { for (const n of m.notes || []) insert(taskCard(n)); return; }
   if (m.role === 'user') {
     const texts = [], imgs = [];
     for (const b of m.blocks) {

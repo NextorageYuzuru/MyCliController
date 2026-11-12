@@ -154,6 +154,20 @@ body.dragging { cursor: col-resize; user-select: none; }
 .acctkind.main { color: var(--accent); border-color: var(--accent); }
 .acctnone { padding: 6px 0; }
 .authalert .aamsg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tasknote { margin: 6px 0; padding: 5px 10px; border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px; font-size: 12.5px; background: var(--panel); }
+.tasknote > summary { cursor: pointer; display: flex; gap: 6px; align-items: baseline; list-style: none; }
+.tasknote > summary::-webkit-details-marker { display: none; }
+.tasknote .tnicon { flex-shrink: 0; }
+.tasknote .tnword { flex-shrink: 0; font-weight: 600; }
+.tasknote .tnhead { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.tasknote[open] .tnhead { white-space: normal; }
+.tasknote.ok { border-left-color: var(--ok); }
+.tasknote.ok .tnicon, .tasknote.ok .tnword { color: var(--ok); }
+.tasknote.err { border-left-color: var(--err); }
+.tasknote.err .tnicon, .tasknote.err .tnword { color: var(--err); }
+.tasknote.limit .tnhead { color: inherit; }
+.tasknote .tnhelp { margin: 6px 0 2px; line-height: 1.5; }
+.tasknote .tnrow { margin-top: 4px; white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
 .sysline.acctwarn { color: var(--warn, #c88a00); }
 .sysline.acctwarn.err { color: var(--err); }
 .acctform { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; margin: 6px 0; border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; }

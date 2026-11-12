@@ -272,8 +272,27 @@ function imgSrc(src) {
   if (src.type === 'url' && src.url) return src.url;
   return null;
 }
+// Claude Code's own notices about background work (subagents, background commands, Monitor events) arrive as user
+// messages made of <task-notification> XML. Turn them into a "task" message the page shows as a small card.
+function taskNotes(text) {
+  const out = [];
+  for (const m of String(text).matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
+    const tag = n => { const x = m[1].match(new RegExp('<' + n + '>([\\s\\S]*?)</' + n + '>')); return x ? x[1].trim() : ''; };
+    out.push({ id: tag('task-id'), status: tag('status'), summary: truncStr(tag('summary'), 2000), result: truncStr(tag('result'), 4000), event: truncStr(tag('event'), 1000) });
+  }
+  return out;
+}
+const TASK_LIMIT = /rate.?limit|hit your [\w-]+ limit|usage limit|\b429\b/i;
 function simplify(role, content, ts, uuid) {
   const blocks = [];
+  if (role === 'user') {
+    const raw = typeof content === 'string' ? content
+      : Array.isArray(content) && content.length && content.every(b => b && b.type === 'text') ? content.map(b => b.text).join('\n') : null;
+    if (raw && /^\s*<task-notification>/.test(raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ''))) {
+      const notes = taskNotes(raw);
+      if (notes.length) return { role: 'task', notes, blocks: [], limit: notes.some(n => n.status === 'failed' && TASK_LIMIT.test(n.summary)), ts, uuid: uuid || crypto.randomUUID() };
+    }
+  }
   if (typeof content === 'string') content = [{ type: 'text', text: content }];
   if (!Array.isArray(content)) return null;
   for (const b of content) {
@@ -618,6 +637,8 @@ function handleLine(run, line) {
       }
       run.live.push(m);
       broadcast({ type: 'msg', sid, msg: m });
+      // a background subagent stopped because the account ran out of quota: same warning as a failed turn
+      if (m.role === 'task' && m.limit) ACC.onError(run.acct, m.notes.find(n => TASK_LIMIT.test(n.summary)).summary, sid);
       return;
     }
     case 'control_request': {

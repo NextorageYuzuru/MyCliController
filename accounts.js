@@ -18,7 +18,7 @@ const { spawn, execFile } = require('child_process');
 const MAIN = 'default'; // id of the main account (kept from v1.9.32 so stored usage carries over)
 const NEAR = 0.9;       // warn once when a window passes this utilization
 const AUTH_ERR = /\b401\b|unauthori[sz]ed|invalid (oauth|access|api)|oauth (access )?token|authenticat|log ?in again|token (has )?expired|revoked/i;
-const LIMIT_ERR = /usage limit|limit reached|hit your limit|rate.?limit|out of (extra )?usage|quota|額度/i;
+const LIMIT_ERR = /usage limit|limit reached|hit your [\w -]*limit|rate.?limit|\b429\b|out of (extra )?usage|quota|額度/i;
 const WINDOW_NAMES = { five_hour: '5 小時', seven_day: '每週', seven_day_opus: '每週 Opus', seven_day_sonnet: '每週 Sonnet' };
 
 module.exports = function createAccounts({ store, saveStore, log, broadcast, cleanEnv, claude, killTree }) {
