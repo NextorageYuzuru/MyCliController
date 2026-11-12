@@ -711,15 +711,20 @@ function renderFocusSidebar(list, ss) {
 }
 function folderMenu(cwd, x, y) {
   const key = folderKey(cwd), cur = groupOfFolder(key);
-  if (S.focusKey) { showMenu(x, y, [['⮌ 退出專注模式', () => exitFocus()]]); return; } // 專注中：資料夾卡片只能退出
+  if (S.focusKey) { showMenu(x, y, [['⮌ 退出專注模式', () => exitFocus()], ...(cwd ? [['⧉ 複製資料夾路徑', () => copyPath(cwd)]] : [])]); return; } // 專注中：資料夾卡片只能退出（和複製路徑）
   const items = [];
   if (cwd) items.push(['🎯 進入專注模式（只看這個資料夾）', () => enterFocus(cwd)]);
   if (cwd && !cur) items.push(['🎨 換資料夾顏色', () => cycleFolderColor(key)]);
   items.push(['＋ 新增資料夾群組…', () => newFolderGroup(key)]);
   for (const g of folderGroups()) if (!cur || g.id !== cur.id) items.push([`➜ 移到群組「${g.name}」`, () => moveFolderToGroup(key, g.id)]);
   if (cur) items.push([`✕ 從「${cur.name}」移出`, () => moveFolderToGroup(key, null)]);
-  if (cwd) items.push(['📂 開啟資料夾', () => reveal(cwd)]);
+  if (cwd) items.push(['📂 開啟資料夾', () => reveal(cwd)], ['⧉ 複製資料夾路徑', () => copyPath(cwd)]);
   showMenu(x, y, items);
+}
+// 複製本地絕對路徑（Windows 格式，例如 C:\Users\…\Project）
+function copyPath(p) {
+  const s = String(p || '').replace(/\//g, '\\');
+  navigator.clipboard.writeText(s).then(() => toast('已複製 ' + s), () => { prompt('無法自動複製，請手動複製：', s); });
 }
 function groupMenu(fg, x, y) {
   showMenu(x, y, [
