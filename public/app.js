@@ -807,7 +807,7 @@ function group(key, label, cwd, items, showFolder, gid) {
 }
 function item(s, showFolder) {
   const run = S.running.has(s.id), wait = S.perms.get(s.id) && S.perms.get(s.id).size;
-  const d = el('div', { class: 'sitem' + (shownIds().has(s.id) ? ' active' : '') + (s.hidden ? ' ishidden' : ''), title: `${s.title}\n${s.cwd}` },
+  const d = el('div', { class: 'sitem' + (shownIds().has(s.id) ? ' active' : '') + (s.hidden ? ' ishidden' : '') + (SEL.ids.has(s.id) ? ' selected' : ''), title: `${s.title}\n${s.cwd}`, 'data-sid': s.id },
     el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, S.source === 'all' && s.source === 'desktop' ? el('span', { class: 'srctag', title: '桌面版開的對話' }, '桌面') : null,
         S.renaming === s.id ? renameInput(s) : dispTitle(s)),
       showFolder ? el('div', { class: 'sfolder muted' }, baseName(s.cwd)) : null),
@@ -817,10 +817,74 @@ function item(s, showFolder) {
     el('span', { class: 'sflag' + (wait ? ' wait' : run ? ' run' : UNREAD.has(s.id) ? ' unread' : ''),
       title: wait ? 'Claude 正在等你回答' : run ? '執行中' : UNREAD.has(s.id) ? '已完成，尚未查看' : '' }));
   // 點一下開啟；對已經是目前焦點的卡片再點一次（連點也一樣）→ 就地改名。右鍵選單的「重新命名」照舊
-  d.onclick = () => { if (S.renaming === s.id) return; if (!S.draft && paneShows(ACTIVE, s.id)) startRename(s); else openHere(s.id); };
-  d.oncontextmenu = e => { e.preventDefault(); sessionMenu(s, e.clientX, e.clientY); };
+  // Ctrl／Shift＋點：多選（同一個資料夾內），選了之後右鍵只有「刪除選取的對話」
+  d.onmousedown = e => { if (e.shiftKey) e.preventDefault(); }; // Shift＋點不要順便選取文字
+  d.onclick = e => {
+    if (S.renaming === s.id) return;
+    if (e.ctrlKey || e.metaKey || e.shiftKey) { e.preventDefault(); selClick(s, e.shiftKey); return; }
+    if (SEL.ids.size) selClear();
+    if (!S.draft && paneShows(ACTIVE, s.id)) startRename(s); else openHere(s.id);
+  };
+  d.oncontextmenu = e => {
+    e.preventDefault();
+    if (SEL.ids.size > 1 && SEL.ids.has(s.id)) { selMenu(e.clientX, e.clientY); return; }
+    if (SEL.ids.size) selClear();
+    sessionMenu(s, e.clientX, e.clientY);
+  };
   return d;
 }
+// ---- 多選（只用來一次刪除多個對話）：Ctrl＋點＝加入／移出，Shift＋點＝從上一次點的到這一個整段選起來 ----
+// 只能選同一個資料夾裡的對話（點到別的資料夾就從那裡重新開始選）。Esc 或一般點擊就取消選取。專注模式也一樣。
+var SEL = { ids: new Set(), anchor: null, fk: null }; // var: item() can be drawn before this line runs
+function selClear() { if (!SEL.ids.size && !SEL.anchor) return; SEL.ids.clear(); SEL.anchor = null; SEL.fk = null; renderSidebar(); }
+function selClick(s, range) {
+  const fk = folderKey(s.cwd || '');
+  if (SEL.fk !== fk) { SEL.ids.clear(); SEL.anchor = null; SEL.fk = fk; }
+  if (range) {
+    // 起點：上一次 Ctrl／Shift 點的；沒有的話用目前主視窗開著的對話（同資料夾時）
+    let a = SEL.anchor;
+    if (!a) { const cur = pst(ACTIVE).cur; const cs = cur && S.sessions.find(x => x.id === cur); if (cs && folderKey(cs.cwd || '') === fk) a = cur; }
+    if (!a) a = s.id;
+    const order = [...document.querySelectorAll('#sessionList .sitem[data-sid]')].map(n => n.dataset.sid)
+      .filter(id => { const x = S.sessions.find(y => y.id === id); return x && folderKey(x.cwd || '') === fk; });
+    const i = order.indexOf(a), j = order.indexOf(s.id);
+    if (i < 0 || j < 0) SEL.ids.add(s.id);
+    else for (let k = Math.min(i, j); k <= Math.max(i, j); k++) SEL.ids.add(order[k]);
+    if (!SEL.anchor) SEL.anchor = a;
+  } else {
+    SEL.ids.has(s.id) ? SEL.ids.delete(s.id) : SEL.ids.add(s.id);
+    SEL.anchor = s.id;
+  }
+  if (!SEL.ids.size) SEL.fk = null;
+  renderSidebar();
+}
+function selMenu(x, y) {
+  showMenu(x, y, [
+    [`🗑 刪除選取的 ${SEL.ids.size} 個對話…`, () => deleteSelected(), 'danger'],
+    ['取消選取', () => selClear()],
+  ]);
+}
+async function deleteSelected() {
+  const list = [...SEL.ids].map(id => S.sessions.find(x => x.id === id)).filter(Boolean);
+  const busy = list.filter(s => S.running.has(s.id)), go = list.filter(s => !S.running.has(s.id));
+  if (!go.length) { toast('選取的對話都正在執行，請先按停止再刪除'); return; }
+  const names = go.slice(0, 12).map(s => '・' + dispTitle(s).slice(0, 50)).join('\n') + (go.length > 12 ? `\n…還有 ${go.length - 12} 個` : '');
+  const desk = go.some(s => s.source === 'desktop') ? '\n\n⚠ 其中有桌面版開的對話。刪除後，桌面版裡的這些對話也會打不開。' : '';
+  const skip = busy.length ? `\n\n（有 ${busy.length} 個正在執行，不會刪除）` : '';
+  if (!confirm(`刪除這 ${go.length} 個對話？\n\n${names}\n\n對話紀錄會移到 Windows 資源回收筒，需要的話還可以從那裡還原。${desk}${skip}`)) return;
+  let ok = 0; const fail = [];
+  for (const s of go) {
+    try {
+      await api('DELETE', `/api/sessions/${s.id}`); ok++;
+      for (const p of panesOn()) if (paneShows(p, s.id)) withPane(p, () => newDraft(s.cwd));
+      S.sessions = S.sessions.filter(x => x.id !== s.id);
+    } catch (e) { fail.push(dispTitle(s).slice(0, 30) + '：' + e.message); }
+  }
+  SEL.ids.clear(); SEL.anchor = null; SEL.fk = null;
+  renderSidebar();
+  toast(`已刪除 ${ok} 個對話（在資源回收筒）` + (fail.length ? `；${fail.length} 個失敗：${fail.join('；')}` : '') + (busy.length ? `；${busy.length} 個執行中未刪除` : ''), fail.length ? 10000 : 5000);
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && SEL.ids.size) selClear(); });
 function startRename(s) {
   S.renaming = s.id; S.renameText = dispTitle(s); renderSidebar();
   const i = document.querySelector('#sessionList .renameIn'); if (i) { i.focus(); i.select(); }
