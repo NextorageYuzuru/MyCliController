@@ -670,7 +670,9 @@ function handleLine(run, line) {
         // an account problem while background tasks keep this process (and its account) alive: switching alone won't help
         if (ACC.onError(run.acct, res.text, sid) && run.bgTasks.length)
           broadcast({ type: 'notice', sid, text: `這個對話還有 ${run.bgTasks.length} 個背景工作在跑，程式不會結束，之後送出的訊息仍會用${ACC.fullName(run.acct)}。要換帳號重送，請先按停止（背景工作會中斷）。` });
+        if (run.pokeTries != null && TASK_LIMIT.test(res.text)) rearmPoke(run.id, run.acct, run.pokeTries);
       } else if (!res.isError) ACC.onSuccess(run.acct);
+      run.pokeTries = null;
       // the result tells us about the login: a success while we think we're logged out, or an auth error → re-check
       if ((!res.isError && authInfo && !authInfo.loggedIn) || (res.isError && /log ?in|auth|401|unauthori|credential|token/i.test(res.text))) scheduleAuth(200);
       learnWindow(run, o.modelUsage);
@@ -870,6 +872,20 @@ function acctCheck(id) {
 // transcript); otherwise, or when it is running right then, the poke is skipped. Either way it is used up.
 const POKE_TEXT = '額度已重置，請從上次中斷的地方繼續。';
 const POKE_LATE_MS = 60000; // reset time + this
+const POKE_MAX_TRIES = 3, POKE_RETRY_MS = 5 * 60000; // a failed / too-early poke is retried, up to this many sends in total
+// The poke's turn hit the quota limit again (sent too early, or the wrong window): book it again for the new reset time.
+function rearmPoke(id, acct, tries) {
+  if (tries >= POKE_MAX_TRIES || !ACC.exists(acct)) return;
+  const r = store.sessions[id]; if (!r || r.poke) return;
+  let sec = null; const s = ACC.status(acct);
+  if (s.code === 'limited' && s.until > Date.now() / 1000) sec = s.until;
+  if (!sec) sec = pokeResetSec(acct);
+  const at = sec ? sec * 1000 + POKE_LATE_MS : Date.now() + POKE_RETRY_MS;
+  r.poke = { at, acct, resetsAt: sec || Math.round(at / 1000), createdAt: Date.now(), tries };
+  log('poke re-armed', id, acct, new Date(at).toISOString());
+  saveStore(); broadcast({ type: 'sessions' });
+  broadcast({ type: 'poke', sid: id, ok: false, text: `⏰ 戳送出後額度仍未恢復，已重新預約到 ${new Date(at).toLocaleString()}` });
+}
 // When the chosen account's quota is (about to be) gone: the latest reset among the windows that are rejected or
 // at 90%+; otherwise the 5-hour window's reset. null when no future reset time is known.
 function pokeResetSec(acct) {
@@ -910,6 +926,16 @@ async function lastEnd(id) {
     if ((o.type !== 'user' && o.type !== 'assistant') || o.isSidechain || !o.message) continue;
     if (o.type === 'assistant' && (o.error === 'rate_limit' || o.apiError === 'usage_limit_reached' ||
       (o.isApiErrorMessage && TASK_LIMIT.test(JSON.stringify(o.message.content || ''))))) return 'limit';
+    if (o.type === 'user') {
+      const c = typeof o.message.content === 'string' ? o.message.content : JSON.stringify(o.message.content || '');
+      if (/<task-notification>/.test(c)) {
+        // a background agent reporting it failed on the quota limit counts as the conversation ending out of quota
+        if (/<status>failed<\/status>/.test(c) && TASK_LIMIT.test(c)) return 'limit';
+        continue; // any other agent notification (finished, killed…) is noise: look further back
+      }
+      // system-made entries (caveats, local commands, interrupt markers) are not the user continuing the conversation
+      if (o.isMeta || /^\s*(<local-command|<command-name|<command-message|\[Request interrupted)/.test(c)) continue;
+    }
     // backup: a turn here ended in a quota error that did not make it into the transcript
     const r = store.sessions[id], ts = Date.parse(o.timestamp) || 0;
     return r && r.lastLimitAt && r.lastLimitAt >= ts ? 'limit' : 'other';
@@ -935,10 +961,15 @@ async function firePoke(id) {
     log('poke fire', id, p.acct, skip || 'send');
     if (skip) { broadcast({ type: 'poke', sid: id, ok: false, text: `⏰ 預約的戳已略過：${skip}` }); return; }
     await sendMessage(id, POKE_TEXT, [], { acct: p.acct });
+    const nr = runs.get(id); if (nr) nr.pokeTries = (p.tries || 0) + 1; // if this turn hits the limit again, re-arm (see 'result')
     broadcast({ type: 'poke', sid: id, ok: true, text: `⏰ 已用${who}戳這個對話（額度重置後自動送出「繼續」）` });
   } catch (e) {
     log('poke failed', id, e.message);
-    broadcast({ type: 'poke', sid: id, ok: false, text: `⏰ 預約的戳送出失敗：${e.message}` });
+    const tries = (p.tries || 0) + 1;
+    if (tries < POKE_MAX_TRIES) { // transient failure (spawn, token refresh…): try again in a few minutes
+      r.poke = { ...p, tries, at: Date.now() + POKE_RETRY_MS }; saveStore();
+      broadcast({ type: 'poke', sid: id, ok: false, text: `⏰ 預約的戳送出失敗（${e.message}），${Math.round(POKE_RETRY_MS / 60000)} 分鐘後再試（第 ${tries + 1}/${POKE_MAX_TRIES} 次）` });
+    } else broadcast({ type: 'poke', sid: id, ok: false, text: `⏰ 預約的戳送出失敗：${e.message}` });
   } finally { pokeBusy.delete(id); broadcast({ type: 'sessions' }); }
 }
 const hasPokes = () => Object.values(store.sessions).some(r => r && r.poke);
