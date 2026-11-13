@@ -525,10 +525,10 @@ img.thumb { max-width: 260px; max-height: 180px; border-radius: 6px; border: 1px
 #tabScroll > .tab.cur:not(.vtab)::before { content: '>'; color: color-mix(in srgb, var(--text) 50%, var(--bg)); font-weight: 800; flex: none; line-height: 1; }
 
 /* 瀏覽器分頁（窗格裡的瀏覽器卡片）：網址列＋整格 iframe */
-.transcript.web { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.transcript.web { padding: 0; overflow: hidden; overflow: clip; display: flex; flex-direction: column; }
 .webbar { display: flex; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--panel); flex: none; }
 .webbar .webaddr { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 12px; }
-.webview { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #fff; }
+.webview { flex: 1; min-height: 0; position: relative; overflow: hidden; overflow: clip; background: #fff; }
 .webframe { position: absolute; left: 0; top: 0; border: 0; background: #fff; transform-origin: 0 0; }
 .webbar .webzoom { flex: none; width: auto; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 12px; }
 .webempty { padding: 28px 18px; text-align: center; }

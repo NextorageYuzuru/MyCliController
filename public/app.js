@@ -430,7 +430,7 @@ function renderWeb() {
   // 縮放：很多網頁是為整個螢幕寬度設計的，放在半格（分割畫面）裡寬度不夠，會跳到「窄版／手機版」排版而錯亂。
   // 所以讓頁面以「虛擬寬度」排版（寬度＝格寬÷縮放比），再整個縮小顯示。「自動」＝至少用 1280px 寬排版，格子比較窄時自動縮小。每個頁面各記一個設定。
   const zk = 'cc_webzoom_' + w.id, zoomSel = el('select', { class: 'webzoom', title: '縮放（頁面排版版面不對時，可以調小讓它用桌面版面）' },
-    ...[['auto', '自動'], ['1', '100%'], ['0.9', '90%'], ['0.8', '80%'], ['0.7', '70%'], ['0.6', '60%'], ['0.5', '50%']].map(([v, t]) => el('option', { value: v }, t)));
+    ...[['auto', '自動'], ['2', '200%'], ['1.75', '175%'], ['1.5', '150%'], ['1.25', '125%'], ['1.1', '110%'], ['1', '100%'], ['0.9', '90%'], ['0.8', '80%'], ['0.7', '70%'], ['0.6', '60%'], ['0.5', '50%']].map(([v, t]) => el('option', { value: v }, t)));
   zoomSel.value = ls(zk) || 'auto'; if (zoomSel.value !== (ls(zk) || 'auto')) zoomSel.value = 'auto';
   const bar = el('div', { class: 'webbar' }, addr, zoomSel,
     el('button', { class: 'btn small', title: '選擇檔案', onclick: () => webPick(w.id) }, '📂'),
@@ -442,11 +442,15 @@ function renderWeb() {
   const view = el('div', { class: 'webview' }, frame);
   const fit = () => {
     const cw = view.clientWidth, ch = view.clientHeight; if (!cw || !ch) return;
-    const m = zoomSel.value, z = m === 'auto' ? Math.min(1, cw / 1280) : Number(m) || 1;
+    const m = zoomSel.value, z = m === 'auto' ? Math.min(1, cw / 960) : Number(m) || 1; // 自動：版面至少 960px 寬（頁面在 900px 以下會切成窄版），格子夠寬就用 100%
     frame.style.width = Math.ceil(cw / z) + 'px'; frame.style.height = Math.ceil(ch / z) + 'px'; frame.style.transform = z === 1 ? '' : `scale(${z})`;
   };
   zoomSel.onchange = () => { ls(zk, zoomSel.value); fit(); };
   T.append(bar, view);
+  // 頁面裡的 scrollIntoView／focus 會連外層（overflow 被隱藏的）容器一起捲動，造成整個頁面被推到下面：外層一律拉回最上面
+  const unscroll = e => { if (e.scrollTop || e.scrollLeft) { e.scrollTop = 0; e.scrollLeft = 0; } };
+  view.addEventListener('scroll', () => unscroll(view)); T.addEventListener('scroll', () => unscroll(T));
+  frame.addEventListener('load', () => { unscroll(view); unscroll(T); });
   new ResizeObserver(fit).observe(view); fit();
 }
 // ---- 專注模式：把一個資料夾做成「獨立工作區副本」----
