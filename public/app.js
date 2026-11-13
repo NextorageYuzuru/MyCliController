@@ -2660,6 +2660,14 @@ function renderRailDot() {
   const wait = [...S.perms.values()].some(m => m && m.size);
   const unread = S.sessions.some(s => UNREAD.has(s.id));
   d.className = wait ? 'wait' : unread ? 'unread' : '';
+  sendBadge();
+}
+// 工作列圖示上的小圓點（黃＝等你回答、藍＝跑完還沒看）：把兩種對話的數量告訴後端，數字有變才送
+let badgeSent = '';
+function sendBadge() {
+  const wait = [...S.perms.values()].filter(m => m && m.size).length, unread = S.sessions.filter(s => UNREAD.has(s.id) && !(S.perms.get(s.id) && S.perms.get(s.id).size)).length;
+  const k = wait + ' ' + unread; if (k === badgeSent) return; badgeSent = k;
+  api('POST', '/api/taskbar', { wait, unread }).catch(() => { badgeSent = ''; });
 }
 $('#btnSbHide').onclick = () => applySidebar(true);
 $('#btnSbShow').onclick = () => applySidebar(false);

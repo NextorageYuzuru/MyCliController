@@ -1027,6 +1027,27 @@ function openWindow() {
   else spawn('cmd.exe', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 }
 function psEncoded(script) { return Buffer.from(script, 'utf16le').toString('base64'); }
+// 工作列圖示上的小圓點：黃＝有對話在等你回答、藍＝有對話跑完還沒看（數字是對話數）。前端算好數字後傳來，交給常駐的 PowerShell
+// 小幫手（taskbar-badge.ps1）處理：它把這個 App 視窗的圖示換成「原圖示＋圓點」，黃色增加時工作列按鈕還會閃爍。
+// 小幫手從 stdin 讀行，這個伺服器結束時管線關閉它就跟著結束。
+let badgeProc = null, badgeLast = '0 0';
+function badgeWrite() { try { badgeProc.stdin.write(badgeLast + '\n'); } catch {} }
+function setBadge(wait, unread) {
+  badgeLast = `${Math.max(0, wait | 0)} ${Math.max(0, unread | 0)}`;
+  if (process.platform !== 'win32') return;
+  if (!badgeProc) {
+    if (badgeLast === '0 0') return;
+    badgeProc = spawn('powershell.exe', ['-NoProfile', '-STA', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'taskbar-badge.ps1'), '-Profile', path.join(DATA_DIR, 'browser-profile')],
+      { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+    badgeProc.stderr.setEncoding('utf8'); badgeProc.stderr.on('data', d => log('taskbar badge:', String(d).trim().slice(0, 300)));
+    badgeProc.stdin.on('error', () => {});
+    badgeProc.on('exit', () => { badgeProc = null; });
+    badgeProc.on('error', e => { log('taskbar badge failed', e.message); badgeProc = null; });
+  }
+  badgeWrite();
+}
+// the window may have been closed and reopened (new icon): put the dot back now and then
+setInterval(() => { if (badgeProc && badgeLast !== '0 0') badgeWrite(); }, 30000).unref();
 function pickFolder(initial) {
   // Modern Explorer-style dialog: an OpenFileDialog that accepts a folder ("Folder Selection" trick)
   const ps = `
@@ -1245,6 +1266,11 @@ const server = http.createServer(async (req, res) => {
       log('stopping server (manual)');
       setTimeout(hardExit, 120);
       return;
+    }
+    if (p === '/api/taskbar' && M === 'POST') {
+      const b = await readBody(req).catch(() => ({}));
+      setBadge(Number(b.wait) || 0, Number(b.unread) || 0);
+      return json(res, 200, { ok: true });
     }
     if (p === '/api/server/restart' && M === 'POST') {
       const b = await readBody(req).catch(() => ({}));
