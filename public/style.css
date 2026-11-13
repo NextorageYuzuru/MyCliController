@@ -540,3 +540,10 @@ img.thumb { max-width: 260px; max-height: 180px; border-radius: 6px; border: 1px
 .sb-ctl .btn.icon:hover { background: var(--panel2); color: var(--text); }
 #btnWebToggle.on { color: var(--text); }
 .sb-tools { padding-top: 10px; }
+/* 預約戳：輸入列的小燈（灰＝沒預約，亮橘＝已預約，顯示時間與帳號）；左側清單的 ⏰ 標記 */
+.btn.icon.pokebtn { color: var(--muted); filter: grayscale(1); opacity: .6; }
+.btn.icon.pokebtn:hover { opacity: 1; }
+.btn.icon.pokebtn.on { filter: none; opacity: 1; color: var(--warn); background: var(--warnbg); border-color: var(--warn); font-size: 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 0 6px color-mix(in srgb, var(--warn) 55%, transparent); }
+.btn.icon.pokebtn:disabled { opacity: .35; }
+.spoke { font-size: 10px; color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 0 3px; margin-right: 4px; flex-shrink: 0; white-space: nowrap; }
+@container (max-width: 600px) { .btn.icon.pokebtn.on .pokeacct { display: none; } }

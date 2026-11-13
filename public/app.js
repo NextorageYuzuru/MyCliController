@@ -811,6 +811,7 @@ function item(s, showFolder) {
     el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, S.source === 'all' && s.source === 'desktop' ? el('span', { class: 'srctag', title: '桌面版開的對話' }, '桌面') : null,
         S.renaming === s.id ? renameInput(s) : dispTitle(s)),
       showFolder ? el('div', { class: 'sfolder muted' }, baseName(s.cwd)) : null),
+    s.poke ? el('span', { class: 'spoke', title: `已預約：${new Date(s.poke.at).toLocaleString()} 用${s.poke.acctName}戳這個對話（要求繼續）` }, '⏰' + fmtWhen(s.poke.at)) : null,
     el('span', { class: 'stime muted' }, relTime(s.updatedAt)),
     // 右側狀態點（全部統一在右邊）：黃 = 有問題等你回答、橘閃 = 執行中、藍 = 跑完了還沒看（空位固定保留，標題不會頂到邊）
     el('span', { class: 'sflag' + (wait ? ' wait' : run ? ' run' : UNREAD.has(s.id) ? ' unread' : ''),
@@ -890,7 +891,7 @@ async function loadSessions() {
   const d = await api('GET', '/api/sessions');
   S.sessions = d.sessions;
   for (const s of S.sessions) if (s.running && !S.running.has(s.id)) S.running.set(s.id, { startedAt: Date.now(), activity: '' });
-  renderSidebar(); renderHeads();
+  renderSidebar(); renderHeads(); renderPoke();
 }
 
 // ---------- header (one per pane) ----------
@@ -1090,6 +1091,7 @@ async function send(override) {
       if (useInput) clearComposerOf(p);
       return;
     }
+    if (!(await askAcctBack(id))) return; // switching back was chosen but did not happen: keep the text, send nothing
     if (useInput) clearComposerOf(p);
     withPane(p, () => { S.stick = true; });
     await api('POST', `/api/sessions/${id}/send`, { text, images, compactFirst: await askCompactFirst(id) });
@@ -1097,6 +1099,18 @@ async function send(override) {
   finally { $('#btnSend').disabled = false; input.focus(); }
 }
 $('#btnSend').onclick = () => send();
+// The conversation last ran on another account whose 5-hour quota is still mostly unused (the server decides:
+// 70%+ left, account fine): offer to switch back to it, so one conversation does not hop between accounts.
+// Returns false only when switching back was chosen but did not happen (then nothing is sent).
+async function askAcctBack(id) {
+  let c; try { c = await api('GET', `/api/sessions/${id}/acctcheck`); } catch { return true; }
+  if (!c || !c.suggest) return true;
+  if (!confirm(`這個對話上次是用${c.lastName}聊的（5 小時額度還剩 ${c.left}%），現在選的是${c.curName}。\n\n` +
+    `同一段對話換帳號，第一則訊息會讓新帳號重新讀取整段上下文，比較吃額度。\n\n` +
+    `・確定：切換回${c.lastName}再送出（之後所有新訊息都改用它）\n` +
+    `・取消：照樣用${c.curName}送出`)) return true;
+  return switchAccount(c.last);
+}
 // A long conversation that last ran on another account: offer to compact it there first (that account still has
 // it cached and pays for it), so the account in use only reads a short summary. The server decides when to offer.
 async function askCompactFirst(id) {
@@ -1121,7 +1135,7 @@ function renderComposerState() {
   });
 }
 // everything the composer shows for the active pane
-function refreshComposer() { syncComposers(); inActive(() => { $('#composer').hidden = !!S.web; syncSelectors(); renderCtxActive(); renderAttachments(); renderComposerState(); if (!S.web) autosize(); }); } // 輸入框藏起來時量到的高度是 0：重新顯示後要重算，否則會縮成一條細線
+function refreshComposer() { syncComposers(); inActive(() => { $('#composer').hidden = !!S.web; syncSelectors(); renderCtxActive(); renderAttachments(); renderComposerState(); renderPoke(); if (!S.web) autosize(); }); } // 輸入框藏起來時量到的高度是 0：重新顯示後要重算，否則會縮成一條細線
 
 // ---------- message queue ----------
 // While Claude works, sent messages wait here (per session) and go out by themselves when the turn ends.
@@ -1669,6 +1683,11 @@ function handleEvent(ev) {
     case 'acctWarn': acctWarn(ev, inShown); break;
     case 'auth': renderAuth(ev.auth); break;
     case 'prompts': loadPrompts(); break;
+    case 'poke': // a 預約戳 fired (ok) or was skipped / failed
+      toast(ev.text, 8000);
+      inShown(() => { const st = nearBottom(); insert(el('div', { class: 'sysline muted' }, ev.text)); if (st) scrollBottom(true); });
+      if (!visibleHere) notify('預約戳', ((S.sessions.find(s => s.id === ev.sid) || {}).title || '') + '：' + ev.text);
+      break;
     case 'notice': // e.g. a message that will go out once the previous claude process has exited
       toast(ev.text, 6000);
       inShown(() => insert(el('div', { class: 'sysline muted' }, ev.text)));
@@ -1757,6 +1776,7 @@ function renderAccounts(a) {
   const sel = $('#uAcct'); sel.innerHTML = '';
   for (const x of a.list) sel.append(el('option', { value: x.id }, `${acctKind(x)}｜${x.label}` + (acctBad(x) ? `（${x.status.text}）` : '')));
   sel.value = a.active; sel.hidden = a.list.length < 2;
+  if (typeof renderPoke === 'function' && PANE.L) renderPoke(); // the lamp names the account a new booking would use
   sel.classList.toggle('bad', acctBad(acctOf(a.active)));
   renderAcctAlert();
   if (!$('#settingsModal').hidden) renderSettings();
@@ -1778,7 +1798,7 @@ function renderAcctAlert() {
 // the old account, ones kept alive by background tasks) and ask. Nothing to warn about → switch right away.
 const ACCT_WHY = { loggedOut: '主帳號的 CLI 目前沒有登入，送出訊息會失敗（請先到 ⚙ 設定 → 帳號按「登入」）。', invalid: '這個副帳號的 token 先前被拒絕過（可能過期或已撤銷），送出訊息可能會失敗。' };
 async function switchAccount(id) {
-  if (S.accounts && id === S.accounts.active) return;
+  if (S.accounts && id === S.accounts.active) return true; // returns whether `id` is now the account in use
   try {
     const imp = await api('GET', '/api/accounts/impact?to=' + encodeURIComponent(id));
     const warns = [];
@@ -1791,13 +1811,14 @@ async function switchAccount(id) {
     let stopBg = false;
     if (warns.length) {
       warns.push('另外：換帳號後，每段對話的第一則訊息會重新讀取整段上下文，比平常吃更多新帳號的額度。');
-      if (!confirm(`切換到${imp.to}？\n\n${warns.join('\n\n')}\n\n確定要切換嗎？`)) { renderAccounts(S.accounts); return; }
+      if (!confirm(`切換到${imp.to}？\n\n${warns.join('\n\n')}\n\n確定要切換嗎？`)) { renderAccounts(S.accounts); return false; }
       if (bg.length) stopBg = confirm(`要現在停止上面 ${bg.length} 個有背景工作的對話，讓它們之後也改用${imp.to}嗎？\n\n按「確定」：停止（背景工作會中斷）\n按「取消」：不停止，它們繼續用原本的帳號`);
     }
     const d = await api('POST', '/api/accounts/use', { id, stopBg });
     renderAccounts(d.accounts);
     toast(`已切換到${imp.to}` + (d.stopped ? `，已停止 ${d.stopped} 個有背景工作的對話` : '') + (turning.length ? '。正在執行的對話這一輪結束後才會換過去' : '，之後送出的訊息都用這個帳號'), 7000);
-  } catch (e) { toast(e.message, 6000); renderAccounts(S.accounts); }
+    return true;
+  } catch (e) { toast(e.message, 6000); renderAccounts(S.accounts); return false; }
 }
 $('#uAcct').onchange = e => switchAccount(e.target.value);
 // a problem found after something was sent (quota used up, token rejected, CLI logged out / changed):
@@ -2178,6 +2199,44 @@ function sideRun(title, req) {
       else if (c.kind === 'btw') toast('btw 的回答好了，切回那個對話就看得到');
     }));
 }
+// ---------- 預約戳 (the ⏰ lamp in the composer) ----------
+// Press it in a conversation: the server books one message (「額度已重置，請從上次中斷的地方繼續。」) for the account
+// in use now, at that account's quota reset time + 1 minute. It goes out on that account even if you switch
+// accounts meanwhile — and only if the conversation really stopped because the quota ran out. One shot: the lamp
+// goes out once it has fired (or was skipped). Press the lit lamp to cancel.
+var pokeBusy = false; // var: renderPoke can run (via loadSessions) before this line is reached
+function pokeAcctLabel(p) { const a = acctOf(p.acct); return a ? `${acctKind(a)}｜${a.label}` : '已移除的帳號'; }
+function renderPoke() {
+  inActive(() => {
+    const b = $('#btnPoke'), s = !S.draft && !S.web ? curSession() : null;
+    b.hidden = !s;
+    if (!s) return;
+    const p = s.poke;
+    b.classList.toggle('on', !!p);
+    b.disabled = pokeBusy;
+    b.innerHTML = '';
+    if (p) {
+      b.append('⏰ ' + fmtWhen(p.at), el('span', { class: 'pokeacct' }, ' · ' + pokeAcctLabel(p)));
+      b.title = `已預約戳這個對話：${new Date(p.at).toLocaleString()} 用${p.acctName}送出「額度已重置，請從上次中斷的地方繼續。」\n（${fmtWhen(p.resetsAt * 1000)} 額度重置後 1 分鐘；只有對話那時確實是因為額度用完而中止才會送出）\n按一下取消預約`;
+    } else {
+      b.append('⏰');
+      const a = acctOf((S.accounts || {}).active);
+      b.title = `預約戳：在${a ? acctName(a) : '目前帳號'}的額度重置時間 + 1 分鐘，自動送一則「繼續」給這個對話（只送一次）`;
+    }
+  });
+}
+$('#btnPoke').onclick = async () => {
+  const sid = inActive(() => (!S.draft && !S.web ? S.cur : null)); if (!sid || pokeBusy) return;
+  const s = S.sessions.find(x => x.id === sid), p = s && s.poke;
+  if (p && !confirm(`取消 ${fmtWhen(p.at)} 用${p.acctName}戳這個對話的預約？`)) return;
+  pokeBusy = true; renderPoke();
+  try {
+    if (p) { await api('DELETE', `/api/sessions/${sid}/poke`); toast('已取消預約'); }
+    else { const d = await api('POST', `/api/sessions/${sid}/poke`); toast(`已預約：${fmtWhen(d.poke.at)} 會用${d.poke.acctName}戳這個對話，要求繼續（只有那時對話確實因額度用完而中止才會送出）`, 8000); }
+    await loadSessions();
+  } catch (e) { toast('預約失敗：' + e.message, 8000); }
+  finally { pokeBusy = false; renderPoke(); }
+};
 $('#btnCmds').onclick = () => {
   if (cmd.open) { closeCmd(); return; }
   const v = input.value.trim();

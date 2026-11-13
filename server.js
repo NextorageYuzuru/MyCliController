@@ -239,6 +239,7 @@ async function listSessions() {
       pinned: !!r.pinned, hidden: r.hidden != null ? !!r.hidden : archived, archived, source, app: !!r.createdAt, scratch: isScratch(cwd),
       running: !!(runs.get(id) && runs.get(id).turnActive),
       model: r.model ?? null, effort: r.effort ?? null, permissionMode: r.permissionMode ?? null,
+      poke: pokeView(r.poke),
     });
   }
   return out.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -662,6 +663,7 @@ function handleLine(run, line) {
       const res = { isError: !!o.is_error, subtype: o.subtype, durationMs: o.duration_ms, usage: o.usage,
         text: o.is_error ? (o.result || (o.errors || []).join('\n') || o.subtype || '') : '' };
       if (run.stopped) { res.isError = false; res.stopped = true; }
+      rec(run.id).lastLimitAt = res.isError && TASK_LIMIT.test(res.text) ? Date.now() : 0; // backup for the 預約戳 check
       broadcast({ type: 'result', sid, result: res, ts: Date.now() });
       // out of quota / token rejected: the account module warns and explains (and marks the account)
       if (res.isError && !res.stopped) {
@@ -839,6 +841,108 @@ async function sendWithCompact(id, text, images) {
   broadcast({ type: 'notice', sid: id, text: `先用${c.from}壓縮這段對話（約 ${Math.round(c.tokens / 1000)}k tokens），完成後會自動用${c.to}送出你的訊息` });
   return { compacting: true };
 }
+
+// ---------- the conversation last ran on another account that still has plenty of quota ----------
+// Sending into a conversation whose last account (r.lastAcct) is not the one in use: if that account is fine and its
+// 5-hour window still has ACCT_BACK_LEFT or more left, offer to switch back to it (mixing accounts in one
+// conversation costs a full context re-read on the other account). Unknown usage → not offered.
+const ACCT_BACK_LEFT = 0.7;
+function acctCheck(id) {
+  const no = { suggest: false };
+  const r = store.sessions[id], run = runs.get(id);
+  if (!r || (run && !run.exited)) return no; // a live process keeps its own account anyway
+  const last = r.lastAcct, cur = ACC.active();
+  if (!last || last === cur || !ACC.exists(last) || ACC.status(last).code !== 'ok') return no;
+  const rt = ACC.rate(last); if (!rt) return no;
+  const now = Date.now() / 1000, wins = rt.unifiedWindows || (rt.rateLimitType ? { [rt.rateLimitType]: rt } : {});
+  const live = w => w && !(w.resetsAt && w.resetsAt <= now); // a window past its reset counts as unused
+  if (Object.values(wins).some(w => live(w) && (w.status === 'rejected' || w.utilization >= 0.9))) return no;
+  const five = wins.five_hour; if (!five) return no;
+  const left = live(five) ? 1 - (five.utilization || 0) : 1;
+  if (left < ACCT_BACK_LEFT) return no;
+  return { suggest: true, last, lastName: ACC.fullName(last), curName: ACC.fullName(cur), left: Math.round(left * 100) };
+}
+
+// ---------- 預約戳 (poke): one message, sent once, when the chosen account's quota resets ----------
+// The user presses the lamp in a conversation: the account in use then, and its reset time + 1 minute, are kept on
+// the conversation (store.sessions[id].poke). At that time the server sends POKE_TEXT on that account — whatever
+// account the UI has switched to since. Only if the conversation really ended out of quota (checked in its
+// transcript); otherwise, or when it is running right then, the poke is skipped. Either way it is used up.
+const POKE_TEXT = '額度已重置，請從上次中斷的地方繼續。';
+const POKE_LATE_MS = 60000; // reset time + this
+// When the chosen account's quota is (about to be) gone: the latest reset among the windows that are rejected or
+// at 90%+; otherwise the 5-hour window's reset. null when no future reset time is known.
+function pokeResetSec(acct) {
+  const r = ACC.rate(acct); if (!r) return null;
+  const now = Date.now() / 1000;
+  const wins = Object.entries(r.unifiedWindows || (r.rateLimitType ? { [r.rateLimitType]: r } : {})).filter(([, w]) => w && w.resetsAt > now);
+  const hot = wins.filter(([, w]) => w.status === 'rejected' || w.utilization >= 0.9).map(([, w]) => w.resetsAt);
+  if (hot.length) return Math.max(...hot);
+  const five = wins.find(([k]) => k === 'five_hour');
+  return five ? five[1].resetsAt : (r.resetsAt > now ? r.resetsAt : null);
+}
+function pokeView(p) { return p ? { at: p.at, acct: p.acct, acctName: ACC.exists(p.acct) ? ACC.fullName(p.acct) : '（已移除的帳號）', resetsAt: p.resetsAt } : null; }
+async function setPoke(id) {
+  const acct = ACC.active();
+  let sec = pokeResetSec(acct);
+  // out of quota already: the account module noted until when (from the failed turn) — no request needed
+  if (!sec) { const s = ACC.status(acct); if (s.code === 'limited' && s.until > Date.now() / 1000) sec = s.until; }
+  if (!sec) { try { await ACC.refreshRate(acct, true, true); } catch {} sec = pokeResetSec(acct); }
+  if (!sec) throw new Error(`抓不到${ACC.fullName(acct)}的額度重置時間（可以先按左下用量的 ↻ 更新再試）`);
+  const r = rec(id); if (!r.cwd) r.cwd = sessionCwd(id);
+  r.poke = { at: sec * 1000 + POKE_LATE_MS, acct, resetsAt: sec, createdAt: Date.now() };
+  log('poke set', id, acct, new Date(r.poke.at).toISOString());
+  saveStore(); broadcast({ type: 'sessions' });
+  return pokeView(r.poke);
+}
+function cancelPoke(id) {
+  const r = store.sessions[id]; if (!r || !r.poke) return false;
+  delete r.poke; log('poke cancel', id); saveStore(); broadcast({ type: 'sessions' }); return true;
+}
+// How the conversation's last main-thread message ended: 'limit' (claude's own "You've hit your limit" message,
+// marked error: rate_limit in the transcript), 'other', or 'unknown' (no transcript / nothing readable).
+async function lastEnd(id) {
+  const fp = await findFile(id); if (!fp) return 'unknown';
+  const size = (await fsp.stat(fp)).size, st = Math.max(0, size - 512 * 1024);
+  const lines = parseLines(await readSlice(fp, st, size - st), st > 0, false);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const o = lines[i];
+    if ((o.type !== 'user' && o.type !== 'assistant') || o.isSidechain || !o.message) continue;
+    if (o.type === 'assistant' && (o.error === 'rate_limit' || o.apiError === 'usage_limit_reached' ||
+      (o.isApiErrorMessage && TASK_LIMIT.test(JSON.stringify(o.message.content || ''))))) return 'limit';
+    // backup: a turn here ended in a quota error that did not make it into the transcript
+    const r = store.sessions[id], ts = Date.parse(o.timestamp) || 0;
+    return r && r.lastLimitAt && r.lastLimitAt >= ts ? 'limit' : 'other';
+  }
+  return 'unknown';
+}
+const pokeBusy = new Set();
+async function firePoke(id) {
+  const r = store.sessions[id], p = r && r.poke;
+  if (!p || pokeBusy.has(id)) return;
+  pokeBusy.add(id);
+  try {
+    delete r.poke; saveStore(); // one shot, whatever happens below
+    const who = ACC.exists(p.acct) ? ACC.fullName(p.acct) : null;
+    const run = runs.get(id);
+    let skip = null;
+    if (!who) skip = '預約的帳號已被移除';
+    else if (run && run.turnActive) skip = '這個對話正在執行中';
+    else {
+      const end = await lastEnd(id);
+      if (end === 'other') skip = '這個對話最後不是因為額度用完而中止（可能已經接續過或正常結束）';
+    }
+    log('poke fire', id, p.acct, skip || 'send');
+    if (skip) { broadcast({ type: 'poke', sid: id, ok: false, text: `⏰ 預約的戳已略過：${skip}` }); return; }
+    await sendMessage(id, POKE_TEXT, [], { acct: p.acct });
+    broadcast({ type: 'poke', sid: id, ok: true, text: `⏰ 已用${who}戳這個對話（額度重置後自動送出「繼續」）` });
+  } catch (e) {
+    log('poke failed', id, e.message);
+    broadcast({ type: 'poke', sid: id, ok: false, text: `⏰ 預約的戳送出失敗：${e.message}` });
+  } finally { pokeBusy.delete(id); broadcast({ type: 'sessions' }); }
+}
+const hasPokes = () => Object.values(store.sessions).some(r => r && r.poke);
+setInterval(() => { const now = Date.now(); for (const r of Object.values(store.sessions)) if (r && r.poke && r.poke.at <= now) firePoke(r.id); }, 15000);
 
 // ---------- OS helpers ----------
 function findBrowser() {
@@ -1220,6 +1324,9 @@ const server = http.createServer(async (req, res) => {
         const r = b.compactFirst ? await sendWithCompact(id, String(b.text || ''), imgs) : await sendMessage(id, String(b.text || ''), imgs);
         return json(res, 200, { ok: true, ...(r || {}) });
       }
+      if (act === 'acctcheck' && M === 'GET') return json(res, 200, acctCheck(id));
+      if (act === 'poke' && M === 'POST') return json(res, 200, { poke: await setPoke(id) });
+      if (act === 'poke' && M === 'DELETE') return json(res, 200, { ok: cancelPoke(id) });
       if (act === 'compactcheck' && M === 'GET') return json(res, 200, await compactCheck(id));
       if (act === 'stop' && M === 'POST') return json(res, 200, { ok: stopRun(id) });
       if (act === 'perm' && M === 'POST') { const b = await readBody(req); return json(res, 200, { ok: answerPerm(id, b.requestId, b) }); }
@@ -1262,7 +1369,7 @@ const server = http.createServer(async (req, res) => {
 
 setInterval(() => { for (const c of clients) { try { c.write(': ping\n\n'); } catch {} } }, 20000);
 setInterval(() => {
-  if (KEEP_ALIVE || clients.size || runs.size) return;
+  if (KEEP_ALIVE || clients.size || runs.size || hasPokes()) return; // a pending 預約戳 keeps the server up (window closed or not)
   if (Date.now() - lastClientSeen > IDLE_EXIT_MS) { log('idle, exiting'); flushStore(); process.exit(0); }
 }, 3000);
 process.on('exit', () => { if (saveTimer) flushStore(); for (const r of runs.values()) killTree(r.proc.pid); });
