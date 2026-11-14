@@ -1391,9 +1391,7 @@ function appendMsg(m) {
   }
   for (const b of m.blocks) {
     if (b.type === 'text') {
-      const d = el('div', { class: 'atext md', html: window.md(b.text) });
-      decorateImgLinks(d);
-      insert(d);
+      insert(longAssistantText(b.text));
     } else if (b.type === 'thinking') {
       const th = el('details', { class: 'thinking' }, el('summary', null, '💭 思考過程'), el('div', { class: 'ttext' }, b.text));
       const g = openToolGroup(); // thinking between tool calls stays inside the current group
@@ -1404,6 +1402,50 @@ function appendMsg(m) {
       insert(el('div', { class: 'thumbs' }, thumb(b.src, '圖片')));
     }
   }
+}
+// Very long assistant text (pasted logs, huge listings…) is folded to its first and last few lines, with a button
+// to expand/collapse. The transcript is re-rendered often, so expanded state is remembered by a key of the text.
+const LONG_MIN_LINES = 40, LONG_HEAD = 10, LONG_TAIL = 10;
+const longOpen = new Set();
+function longKey(t) { return t.length + ':' + t.slice(0, 60) + t.slice(-60); }
+function fenceOpenAt(lines) { // true if the given lines end inside an unclosed ``` fence
+  let open = false;
+  for (const l of lines) if (/^\s*(```|~~~)/.test(l)) open = !open;
+  return open;
+}
+function longAssistantText(text) {
+  const mk = html => { const d = el('div', { class: 'atext md', html }); decorateImgLinks(d); return d; };
+  const lines = text.split('\n');
+  if (lines.length < LONG_MIN_LINES) return mk(window.md(text));
+  const key = longKey(text);
+  const wrap = el('div', { class: 'longtext' });
+  const draw = () => {
+    wrap.replaceChildren();
+    const open = longOpen.has(key);
+    const hidden = lines.length - LONG_HEAD - LONG_TAIL;
+    let btn;
+    if (open) {
+      wrap.append(mk(window.md(text)));
+      btn = el('button', { class: 'longbtn' }, `▲ 收起（共 ${lines.length} 行）`);
+    } else {
+      const head = lines.slice(0, LONG_HEAD), tail = lines.slice(-LONG_TAIL);
+      const headOpen = fenceOpenAt(head), tailOpen = fenceOpenAt(lines.slice(0, lines.length - LONG_TAIL));
+      wrap.append(mk(window.md(head.join('\n') + (headOpen ? '\n```' : ''))));
+      wrap.append(el('div', { class: 'longgap' }, `⋯ 省略 ${hidden} 行 ⋯`));
+      wrap.append(mk(window.md((tailOpen ? '```\n' : '') + tail.join('\n'))));
+      btn = el('button', { class: 'longbtn' }, `▼ 展開全部（共 ${lines.length} 行）`);
+    }
+    btn.addEventListener('click', () => {
+      const nb = nearBottom();
+      if (open) longOpen.delete(key); else longOpen.add(key);
+      draw();
+      if (open) wrap.scrollIntoView({ block: 'nearest' });
+      else if (nb) scrollBottom(true);
+    });
+    wrap.append(btn);
+  };
+  draw();
+  return wrap;
 }
 function decorateImgLinks(container) {
   const paths = [...new Set([...container.querySelectorAll('.imglink')].map(a => a.dataset.path))];
