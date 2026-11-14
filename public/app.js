@@ -38,8 +38,12 @@ const S = {
 };
 // /btw floating side-chat window (see the bottom of this file for the logic)
 let btwPop = null, btwIn = null, btwAnchor = null, btwScale = 1;
-let btwPane = null;   // the pane the window is docked to (never follows focus)
+let btwPane = null;   // the pane the window is currently shown in (always the active pane's)
 let btwBusy = 0;      // how many btw answers are still streaming
+// 每個對話各自管理自己的 /btw：{ open: 小視窗是否開著, items: [{ q, state:'run'|'done', text, isError }], draft: 輸入框裡打到一半的字 }
+// 小視窗只有一個，永遠顯示「目前作用中那一格的對話」的內容；那個對話沒開著 /btw 就不顯示。切走再切回來，內容和開關都還在。
+const BTW = new Map();
+function btwSt(sid, make) { let st = BTW.get(sid); if (!st && make) { st = { open: false, items: [], draft: '' }; BTW.set(sid, st); } return st || null; }
 // ---------- panes ----------
 // The content area has one pane (L) or two side by side (L + R, 右側分割視窗). Each pane keeps its own session,
 // draft, transcript and scroll position. The rendering code below works on the globals S / T / tail: the state of
@@ -972,6 +976,7 @@ function renderHead() {
   h.cwd.hidden = S.web || !S.cwd;
   h.model.textContent = S.model ? '· ' + S.model : '';
   // 視窗最上面那條（Windows 標題列／工作列）永遠顯示軟體名稱，不跟著切換對話變動（頁面 <title> 固定）
+  btwRepos(); // 換了對話：/btw 小視窗跟著換成那個對話自己的狀態
 }
 // context length: how much of the model's context window this session currently fills
 function fmtTok(n) {
@@ -1320,7 +1325,7 @@ async function openSession(id, p = ACTIVE) {
     for (const ev of pending) { if (ev.type === 'msg' && seen.has(ev.msg.uuid)) continue; handleEvent(ev); }
     renderHead(); refreshComposer();
     S.stick = true; scrollBottom(true);
-    if (btwPop && !btwPop.hidden) btwRepos(); // 對話在同一个面板被换掉：让小视窗重新对应新的 session
+    btwRepos(); // 對話在同一個面板被換掉：小視窗改成對應那個對話自己的狀態
     if (p === ACTIVE) input.focus();
   });
 }
@@ -2950,9 +2955,8 @@ function setActive(p) {
   renderTabs();
   updateFocusMarks();
   refreshComposer(); renderStrip(); renderHead();
-  // 分割視窗下切換焦點：btw 小視窗是綁在「開啟它的那一格」，不跟焦點走。切到別的格 = 當作取消，直接關掉
-  // （AI 還在回答中就先留著，讓答案跑完；切回原來那格會看到）。
-  if (btwPop && !btwPop.hidden && btwPane && p !== btwPane && !btwBusy) btwCancel();
+  // 分割視窗下切換焦點：小視窗顯示的是作用中那一格的對話自己的 /btw（沒開就不顯示），切回來內容還在
+  btwRepos();
   if (!pst(p).web) input.focus(); // 瀏覽器卡片：不要把焦點搶去輸入框（網址列要能打字）
 }
 // 跟主視窗互換：右邊這格變成主視窗（L）、原本的主視窗變成副視窗（R）。只換位置，內容、捲動位置、草稿都留在各自那格
@@ -2980,7 +2984,6 @@ function openRight(sid) {
 function closeRight() {
   const R = PANE.R;
   if (R.el.hidden) return;
-  if (btwPop && !btwPop.hidden && btwPane === R) btwCancel(); // 小視窗綁在右格：右格要關了，一起關掉
   if (ipPane === R) closeImgPop();
   if (ACTIVE === R) setActive(PANE.L);
   stashComposer(R); // 右格的草稿留著，之後再開那個對話還在
@@ -3042,6 +3045,7 @@ function btwEnsure() {
       el('button', { class: 'btn primary small', id: 'btwSendB', title: '送出 (Enter)' }, '送出')));
   ($('#main') || document.body).append(btwPop);
   btwIn = $('#btwInput');
+  btwIn.addEventListener('input', () => { const st = btwAnchor && btwSt(btwAnchor); if (st) st.draft = btwIn.value; });
   $('#btwClose').onclick = btwHide;
   $('#btwSize').onclick = btwSizeToggle;
   $('#btwSendB').onclick = btwSend;
@@ -3058,59 +3062,70 @@ function btwSizeToggle() {
   $('#btwSize').textContent = btwScale === 2 ? '½' : '⅔';
   btwRepos(); btwIn.focus();
 }
-// dock to the pane it was opened in (btwPane, never ACTIVE), align to that transcript's top/left, size by btwScale
+// 小視窗貼在「目前作用中那一格」的上方：那一格的對話有開著 /btw 才顯示，內容是那個對話自己的；沒開就收起來（內容保留）
+function btwThreadRender() {
+  const th = btwThread(), st = btwSt(btwAnchor); th.innerHTML = '';
+  for (const it of (st ? st.items : [])) {
+    const a = el('div', { class: 'btwa ' + (it.state === 'run' ? 'run' : 'md' + (it.isError ? ' err' : '')) });
+    if (it.state === 'run') a.append(el('span', { class: 'spinner' }), ' 思考中…（不影響原本的對話）');
+    else { a.innerHTML = window.md(it.text || (it.isError ? '（發生錯誤）' : '（沒有輸出）')); decorateImgLinks(a); }
+    th.append(el('div', { class: 'btwq' }, el('b', null, '我'), el('span', null, it.q)), a);
+  }
+  th.scrollTop = th.scrollHeight;
+}
 function btwRepos() {
-  if (!btwPop || btwPop.hidden) return;
-  if (!btwPane || btwPane.el.hidden) { btwCancel(); return; }  // 那個分割格已經被關掉 → 小視窗也關掉
-  const pane = btwPane, T = pane.T, cs = getComputedStyle(T);
+  if (!btwPop) return;
+  const pane = ACTIVE, ps = pst(pane), sid = (!ps.draft && !ps.web && ps.cur) ? ps.cur : null, st = sid && btwSt(sid);
+  if (!st || !st.open || pane.el.hidden) { btwPop.hidden = true; btwPane = null; btwAnchor = null; return; } // anchor 清掉：下次顯示時一定重畫內容
+  const T = pane.T, cs = getComputedStyle(T);
+  btwPane = pane;
   if (btwPop.parentElement !== pane.el) pane.el.append(btwPop);
   const pl = parseFloat(cs.paddingLeft) || 0, pt = parseFloat(cs.paddingTop) || 0;
   btwPop.style.left = pl + 'px';
   btwPop.style.top = Math.round(T.offsetTop + pt + 4) + 'px';
   btwPop.style.width = Math.round(Math.min(T.clientWidth - pl * 2, 860)) + 'px';
   btwPop.style.height = Math.round(T.clientHeight * (btwScale === 2 ? 0.66 : 0.5)) + 'px';
-  const st = pst(pane), sid = (!st.draft && st.cur) ? st.cur : null;
-  if (sid !== btwAnchor) { btwAnchor = sid; btwThread().innerHTML = ''; }
-  const s = sid ? S.sessions.find(x => x.id === sid) : null;
+  if (sid !== btwAnchor) { // 換成另一個對話：先把上一個對話打到一半的字存起來，再換成這個對話自己的內容
+    const prev = btwAnchor && btwSt(btwAnchor); if (prev) prev.draft = btwIn.value;
+    btwAnchor = sid; btwThreadRender(); btwIn.value = st.draft || '';
+  }
+  const s = S.sessions.find(x => x.id === sid);
   $('#btwTitle').textContent = '💬 順帶一提' + (s ? ' · ' + (s.title || '') : '');
+  btwPop.hidden = false;
 }
 function btwShow() {
   btwEnsure();
   closeImgPop(); if (!$('#viewer').hidden) closeViewer(); // 看圖 UI 和 /btw 互斥
-  btwPane = ACTIVE;               // 綁在目前作用中的那一格
-  const st = pst(btwPane);
-  if (st.draft || !st.cur) { btwPane = null; toast('先在對話裡才能用「順帶一提」'); return; }
+  const ps = pst(ACTIVE);
+  if (ps.draft || ps.web || !ps.cur) { toast('先在對話裡才能用「順帶一提」'); return; }
+  btwSt(ps.cur, true).open = true;
   btwPop.classList.toggle('btw-lg', btwScale === 2);
   $('#btwSize').textContent = btwScale === 2 ? '½' : '⅔';
-  btwPop.hidden = false; btwRepos(); btwIn.focus();
+  btwRepos(); btwIn.focus();
 }
-function btwHide() { if (btwPop) btwPop.hidden = true; input.focus(); }   // 手動關閉：保留內容，之後開同一個對話還在
-function btwCancel() {                                                        // 切焦點/關格子：當作沒開過
-  if (!btwPop) return;
-  btwPop.hidden = true; btwThread().innerHTML = ''; btwAnchor = null; btwPane = null;
-}
+// 手動關閉（✕／Esc／再按 💬）：只關這個對話的小視窗，內容保留，之後再開還在
+function btwHide() { const st = btwAnchor && btwSt(btwAnchor); if (st) { st.open = false; st.draft = btwIn.value; } if (btwPop) btwPop.hidden = true; btwPane = null; btwAnchor = null; input.focus(); }
 function btwToggle() { if (btwPop && !btwPop.hidden && btwIn === document.activeElement) btwHide(); else btwShow(); }
 function runBtw(text) {
   text = String(text || '').trim(); if (!text) return;
   const sid = btwAnchor;
   if (!sid) { toast('/btw 要在已經開始的對話裡使用'); return; }
-  const th = btwThread();
-  const q = el('div', { class: 'btwq' }, el('b', null, '我'), el('span', null, text));
-  const a = el('div', { class: 'btwa run' }, el('span', { class: 'spinner' }), ' 思考中…（不影響原本的對話）');
-  th.append(q, a); th.scrollTop = th.scrollHeight;
+  const st = btwSt(sid, true), it = { q: text, state: 'run', text: '', isError: false };
+  st.items.push(it); st.open = true; btwThreadRender();
   btwBusy++;
   api('POST', '/api/side', { sid, kind: 'btw', text })
-    .then(r => {
-      a.className = 'btwa md' + (r.isError ? ' err' : '');
-      a.innerHTML = window.md(r.text || (r.isError ? '（發生錯誤）' : '（沒有輸出）'));
-      decorateImgLinks(a);
-    })
-    .catch(e => { a.className = 'btwa err'; a.textContent = e.message; })
-    .finally(() => { btwBusy = Math.max(0, btwBusy - 1); th.scrollTop = th.scrollHeight; });
+    .then(r => { it.text = r.text; it.isError = !!r.isError; })
+    .catch(e => { it.text = e.message; it.isError = true; })
+    .finally(() => {
+      btwBusy = Math.max(0, btwBusy - 1); it.state = 'done';
+      // 答案存回「那個對話」自己的紀錄；現在剛好顯示的就是它才重畫，不然切回去時就看得到
+      if (btwAnchor === sid && btwPop && !btwPop.hidden) btwThreadRender();
+      else { const s = S.sessions.find(x => x.id === sid); toast(`💬 btw 的回答好了，切回「${s ? (s.title || '').slice(0, 20) : '那個對話'}」就看得到`); }
+    });
 }
 function btwSend() {
   const v = btwIn.value.trim(); if (!v) return;
-  btwIn.value = ''; runBtw(v); btwIn.focus();
+  btwIn.value = ''; const st = btwSt(btwAnchor); if (st) st.draft = ''; runBtw(v); btwIn.focus();
 }
 $('#btwBtn').onclick = btwToggle;
 addEventListener('resize', () => { if (btwPop && !btwPop.hidden) btwRepos(); });
