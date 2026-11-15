@@ -1049,18 +1049,71 @@ function setBadge(wait, unread) {
 // the window may have been closed and reopened (new icon): put the dot back now and then
 setInterval(() => { if (badgeProc && badgeLast !== '0 0') badgeWrite(); }, 30000).unref();
 function pickFolder(initial) {
-  // Modern Explorer-style dialog: an OpenFileDialog that accepts a folder ("Folder Selection" trick)
+  // The real Windows folder picker (IFileOpenDialog with FOS_PICKFOLDERS): select a folder and press 選擇資料夾, or press it
+  // with nothing selected to take the folder you are currently looking at. (The old OpenFileDialog "Folder Selection"
+  // trick made Open walk into a sub-folder instead of returning.)
   const ps = `
 Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace CC {
+  [ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")] class FileOpenDialogCls { }
+  [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IShellItem {
+    void BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+    void GetParent(out IShellItem ppsi);
+    void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string name);
+    void GetAttributes(uint mask, out uint attrs);
+    void Compare(IShellItem psi, uint hint, out int order);
+  }
+  [ComImport, Guid("42F85136-DB7E-439C-85F1-E4075D135FC8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IFileOpenDialog {
+    [PreserveSig] int Show(IntPtr parent);
+    void SetFileTypes(uint n, IntPtr types);
+    void SetFileTypeIndex(uint i);
+    void GetFileTypeIndex(out uint i);
+    void Advise(IntPtr events, out uint cookie);
+    void Unadvise(uint cookie);
+    void SetOptions(uint fos);
+    void GetOptions(out uint fos);
+    void SetDefaultFolder(IShellItem psi);
+    void SetFolder(IShellItem psi);
+    void GetFolder(out IShellItem psi);
+    void GetCurrentSelection(out IShellItem psi);
+    void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);
+    void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string name);
+    void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
+    void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
+    void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string text);
+    void GetResult(out IShellItem psi);
+  }
+  public static class Picker {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    static extern void SHCreateItemFromParsingName(string path, IntPtr bc, ref Guid riid, out IShellItem item);
+    public static string Pick(IntPtr owner, string initial, string title) {
+      IFileOpenDialog d = (IFileOpenDialog)new FileOpenDialogCls();
+      uint o; d.GetOptions(out o); d.SetOptions(o | 0x20 | 0x40 | 0x800); // PICKFOLDERS | FORCEFILESYSTEM | PATHMUSTEXIST
+      d.SetTitle(title);
+      d.SetOkButtonLabel("選擇資料夾");
+      if (!string.IsNullOrEmpty(initial) && System.IO.Directory.Exists(initial)) {
+        Guid g = new Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE"); IShellItem it;
+        SHCreateItemFromParsingName(initial, IntPtr.Zero, ref g, out it);
+        d.SetFolder(it);
+      }
+      if (d.Show(owner) != 0) return null;
+      IShellItem r; d.GetResult(out r);
+      string p; r.GetDisplayName(0x80058000, out p); // SIGDN_FILESYSPATH
+      return p;
+    }
+  }
+}
+'@
 $w = New-Object System.Windows.Forms.Form
 $w.TopMost = $true; $w.ShowInTaskbar = $false; $w.Opacity = 0; $w.StartPosition = 'CenterScreen'; $w.Show(); $w.Activate()
-$d = New-Object System.Windows.Forms.OpenFileDialog
-$d.ValidateNames = $false; $d.CheckFileExists = $false; $d.CheckPathExists = $true
-$d.FileName = '選擇此資料夾'
-$d.Title = '選擇工作資料夾 (進入資料夾後按「開啟」)'
-if ($env:CC_INIT -and (Test-Path -LiteralPath $env:CC_INIT)) { $d.InitialDirectory = $env:CC_INIT }
-if ($d.ShowDialog($w) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output (Split-Path -Parent $d.FileName) }
+$p = [CC.Picker]::Pick($w.Handle, $env:CC_INIT, '選擇工作資料夾')
+if ($p) { Write-Output $p }
 $w.Close()`;
   return new Promise(resolve => {
     execFile('powershell.exe', ['-NoProfile', '-STA', '-NonInteractive', '-EncodedCommand', psEncoded(ps)],
