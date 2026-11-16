@@ -318,8 +318,9 @@ svg.ico { flex: none; display: block; }
 .transcript > * { max-width: 860px; }
 .loading { padding: 40px; text-align: center; }
 .btn.showmore { display: flex; width: max-content; margin: 0 auto 16px; }
-.user { background: var(--user); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px 10px 16px; margin: 22px 0 12px; position: relative; box-shadow: var(--shadow-card); }
-.user::before { content: ""; position: absolute; left: -1px; top: 9px; bottom: 9px; width: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent); }
+/* 使用者的發言：像通訊軟體「自己的訊息」一樣，強調色亮條在右側 */
+.user { background: var(--user); border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px 10px 14px; margin: 22px 0 12px; position: relative; box-shadow: var(--shadow-card); }
+.user::before { content: ""; position: absolute; right: -1px; top: 9px; bottom: 9px; width: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent); }
 .utext { white-space: pre-wrap; word-break: break-word; }
 .atext { margin: 6px 0; word-break: break-word; }
 .sysline { text-align: center; font-size: 12px; margin: 12px 0; }
