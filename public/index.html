@@ -11,17 +11,17 @@
 <body>
 <div id="app">
   <aside id="sidebar">
+    <div class="sb-ctl">
+      <button id="btnNew" class="btn newbtn" type="button" title="新對話 (Ctrl+N)" data-ico="plus" data-ico-label="新對話"></button>
+      <button id="btnWebToggle" class="btn icon" type="button" title="顯示／隱藏瀏覽器分頁群組" data-ico="globe"></button>
+      <button id="btnSbHide" class="btn icon" type="button" title="收起左側列表 (Ctrl+B)" data-ico="chevsL"></button>
+    </div>
     <div class="sb-tools">
-      <input id="search" type="search" placeholder="搜尋對話 / 資料夾…">
+      <input id="search" type="search" placeholder="搜尋對話 / 資料夾…" spellcheck="false">
     </div>
     <div class="seg" id="modeSeg">
       <button id="btnSource" type="button"></button>
       <button id="btnSort" type="button"></button>
-    </div>
-    <div class="sb-ctl">
-      <button id="btnWebToggle" class="btn icon" type="button" title="顯示／隱藏瀏覽器分頁群組"><svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10" cy="10" r="7.3"/><path d="M2.7 10h14.6"/><path d="M10 2.7c2.2 2.1 3.3 4.5 3.3 7.3s-1.1 5.2-3.3 7.3c-2.2-2.1-3.3-4.5-3.3-7.3S7.8 4.8 10 2.7z"/></svg></button>
-      <button id="btnNew" class="btn icon primary" type="button" title="新對話 (Ctrl+N)"><svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg></button>
-      <button id="btnSbHide" class="btn icon" type="button" title="收起左側列表 (Ctrl+B)"><svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 5L6.5 10l5 5"/><path d="M16 5l-5 5 5 5"/></svg></button>
     </div>
     <div id="sessionList"></div>
     <div class="sb-foot">
@@ -33,23 +33,23 @@
           <select id="uAcct" class="uacct" title="切換帳號：之後送出的訊息改用這個帳號（正在執行的對話這一輪結束後才換）" hidden></select>
           <span id="uUpdated" class="muted"></span>
           <span class="grow"></span>
-          <button id="uRefresh" class="btn icon small" title="立即更新用量（送出一個極小的 Haiku 請求，約 650 tokens）。對話執行中會自動更新，不需要按">↻</button>
+          <button id="uRefresh" class="btn icon small" title="立即更新用量（送出一個極小的 Haiku 請求，約 650 tokens）。對話執行中會自動更新，不需要按" data-ico="refresh" data-ico-size="13"></button>
         </div>
         <div id="uRows"></div>
       </div>
       <div class="footrow">
         <div id="verLine" class="muted small"></div>
-        <button id="btnKillServer" class="btn icon small" title="關閉後端（結束背景服務和它開的 claude 對話；有對話在執行會先確認）">⏻</button>
-        <button id="btnRestartServer" class="btn icon small" title="重啟後端（不用重開視窗，換成新版；有對話在執行會先確認）">⟳</button>
+        <button id="btnKillServer" class="btn icon small" title="關閉後端（結束背景服務和它開的 claude 對話；有對話在執行會先確認）" data-ico="power" data-ico-size="14"></button>
+        <button id="btnRestartServer" class="btn icon small" title="重啟後端（不用重開視窗，換成新版；有對話在執行會先確認）" data-ico="restart" data-ico-size="14"></button>
         <span class="grow"></span>
-        <button id="btnSettings" class="btn icon" title="設定（帳號、外觀、左側列表、對話…）">⚙</button>
+        <button id="btnSettings" class="btn icon" title="設定（帳號、外觀、左側列表、對話…）" data-ico="settings"></button>
       </div>
     </div>
   </aside>
   <div id="sbRail" hidden>
-    <button id="btnSbShow" class="btn icon" title="展開左側列表 (Ctrl+B)">»<i id="railDot"></i></button>
-    <button id="btnTabs" class="btn icon" title="顯示／隱藏頂端分頁列"><svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2.2"/><path d="M2.5 8h15M8 8V3.5"/></svg></button>
-    <button id="btnNewRail" class="btn icon" title="新對話 (Ctrl+N)">＋</button>
+    <button id="btnSbShow" class="btn icon" title="展開左側列表 (Ctrl+B)"><span data-ico="chevsR"></span><i id="railDot"></i></button>
+    <button id="btnTabs" class="btn icon" title="顯示／隱藏頂端分頁列" data-ico="tabs"></button>
+    <button id="btnNewRail" class="btn icon" title="新對話 (Ctrl+N)" data-ico="plus"></button>
     <div class="grow"></div>
     <div id="railGauges"></div>
   </div>
@@ -63,11 +63,11 @@
         <header class="chatHead">
           <div class="hleft">
             <div class="htitle" data-role="title" title="雙擊重新命名">新對話</div>
-            <div class="hsub"><span class="chip hcwd" data-role="cwd" title="在檔案總管開啟"></span><span class="muted small" data-role="model"></span></div>
+            <div class="hsub"><span class="chip hcwd" data-role="cwd" title="在檔案總管開啟"></span><span class="hmodel" data-role="model"></span></div>
           </div>
           <div class="hright">
-            <button class="btn icon" data-act="split-swap" title="與主視窗互換（這一格變主視窗，主視窗變副視窗）">⇄</button>
-            <button class="btn icon" data-act="split-close" title="關閉右側分割視窗">✕</button>
+            <button class="btn icon" data-act="split-swap" title="與主視窗互換（這一格變主視窗，主視窗變副視窗）" data-ico="swap"></button>
+            <button class="btn icon" data-act="split-close" title="關閉右側分割視窗" data-ico="x"></button>
           </div>
         </header>
         <div class="transcript"></div>
@@ -75,13 +75,13 @@
     </template>
     <div id="composer">
       <div id="cmdPop" hidden>
-        <div class="pphead"><span class="pptitle">/ 指令</span><span class="muted small" id="cmdHint"></span></div>
+        <div class="pphead"><span class="pptitle"><span data-ico="slash" data-ico-size="14"></span>指令</span><span class="muted small" id="cmdHint"></span></div>
         <div id="cmdList"></div>
         <div class="ppfoot"><span class="muted small">↑↓ 選擇 · Enter / Tab 選用（不需參數的指令會直接執行）· Esc 關閉</span></div>
       </div>
       <div id="promptPop" hidden>
         <div class="pphead">
-          <span class="pptitle">⚡ 常用 Prompt</span>
+          <span class="pptitle"><span data-ico="zap" data-ico-size="14"></span>常用 Prompt</span>
           <input id="ppSearch" type="search" placeholder="搜尋…">
         </div>
         <div id="ppList"></div>
@@ -89,14 +89,13 @@
           <span class="muted small">↑↓ 選擇 · Enter 插入 · Ctrl+Enter 插入並送出 · Esc 關閉</span>
           <span class="grow"></span>
           <button id="ppSaveCur" class="btn small" title="把輸入框目前的內容存成常用 Prompt">把目前輸入存成常用</button>
-          <button id="ppNew" class="btn small primary">＋ 新增</button>
+          <button id="ppNew" class="btn small primary" data-ico="plus" data-ico-label="新增" data-ico-size="13"></button>
         </div>
       </div>
       <div id="queueBox" hidden></div>
       <div id="attachments"></div>
       <div class="inputwrap">
         <textarea id="input" rows="1" placeholder="輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片)"></textarea>
-      </div>
       <div class="crow">
         <label class="sel" title="模型"><span>模型</span>
           <select id="selModel">
@@ -127,13 +126,14 @@
         <span class="grow"></span>
         <span id="ctxMeter" class="ctx" hidden><span class="ctxlabel">Context</span><span class="ctxbar"><i></i></span><span class="ctxnum"></span></span>
         <button id="btnPoke" class="btn icon pokebtn" hidden></button>
-        <button id="btnCmds" class="btn icon slashbtn" title="指令選單（在輸入框開頭打 / 也可以）">/</button>
-        <button id="btnPrompts" class="btn icon" title="常用 Prompt (Ctrl+/，或在輸入框開頭打 //)">⚡</button>
-        <button id="btnAttach" class="btn icon" title="附加圖片">📎</button>
+        <button id="btnCmds" class="btn icon slashbtn" title="指令選單（在輸入框開頭打 / 也可以）" data-ico="slash"></button>
+        <button id="btnPrompts" class="btn icon" title="常用 Prompt (Ctrl+/，或在輸入框開頭打 //)" data-ico="zap"></button>
+        <button id="btnAttach" class="btn icon" title="附加圖片" data-ico="clip"></button>
         <input id="fileInput" type="file" accept="image/*" multiple hidden>
-        <button id="btwBtn" class="btn icon" title="順帶一提（快速問一個不寫進對話的問題；或打 /btw）">💬</button>
-        <button id="btnStop" class="btn danger" hidden>■ 停止</button>
-        <button id="btnSend" class="btn primary">送出 ➤</button>
+        <button id="btwBtn" class="btn icon" title="順帶一提（快速問一個不寫進對話的問題；或打 /btw）" data-ico="msg"></button>
+        <button id="btnStop" class="btn danger stopbtn" hidden data-ico="stop" data-ico-label="停止" data-ico-size="12"></button>
+        <button id="btnSend" class="btn primary sendbtn"><span class="blabel">送出</span></button>
+      </div>
       </div>
     </div>
   </main>
@@ -143,9 +143,9 @@
     <div class="vhead">
       <span id="vTitle" class="vtitle"></span>
       <button id="vFit" class="btn small" title="切換 適合視窗 / 原始尺寸">適合</button>
-      <button id="vReveal" class="btn small" title="在檔案總管顯示">📂</button>
-      <button id="vZoom" class="btn small" title="放大（燈箱）">⤢</button>
-      <button id="vClose" class="btn icon small" title="關閉">✕</button>
+      <button id="vReveal" class="btn icon small" title="在檔案總管顯示" data-ico="folder" data-ico-size="14"></button>
+      <button id="vZoom" class="btn icon small" title="放大（燈箱）" data-ico="expand" data-ico-size="14"></button>
+      <button id="vClose" class="btn icon small" title="關閉" data-ico="x" data-ico-size="14"></button>
     </div>
     <div id="vBody"><div id="vEmpty" class="muted">點對話中的圖片，或圖片路徑連結，就會在這裡顯示。</div><img id="vImg" alt="" hidden></div>
     <div id="vStrip"></div>
@@ -166,7 +166,7 @@
 </div>
 <div id="settingsModal" class="modalbg" hidden>
   <div class="modal settings">
-    <div class="mhead"><h3>⚙ 設定</h3><span class="grow"></span><button id="setClose" class="btn icon" title="關閉 (Esc)">✕</button></div>
+    <div class="mhead"><h3><span data-ico="settings" data-ico-size="17"></span>設定</h3><span class="grow"></span><button id="setClose" class="btn icon" title="關閉 (Esc)" data-ico="x"></button></div>
     <div id="setBody"></div>
     <div class="muted small">設定會立即套用，不用儲存。</div>
   </div>
@@ -184,6 +184,7 @@
 <div id="menu" hidden></div>
 <div id="toast" hidden></div>
 <script src="md.js"></script>
+<script src="icons.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

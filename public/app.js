@@ -18,6 +18,8 @@ function el(tag, attrs, ...kids) {
   for (const k of kids.flat()) if (k != null && k !== false) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
   return e;
 }
+// 收合三角形（線條圖示）
+const caret = collapsed => el('span', { class: 'caret' }, ico(collapsed ? 'chevR' : 'chevD', 12));
 async function api(method, url, body) {
   const r = await fetch(url, { method, headers: { 'x-token': TOKEN, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   if (!r.ok) { let msg = r.statusText; try { msg = (await r.json()).error || msg; } catch {} throw new Error(msg); }
@@ -439,10 +441,10 @@ function renderWeb() {
     ...[['auto', '自動'], ['2', '200%'], ['1.75', '175%'], ['1.5', '150%'], ['1.25', '125%'], ['1.1', '110%'], ['1', '100%'], ['0.9', '90%'], ['0.8', '80%'], ['0.7', '70%'], ['0.6', '60%'], ['0.5', '50%']].map(([v, t]) => el('option', { value: v }, t)));
   zoomSel.value = ls(zk) || 'auto'; if (zoomSel.value !== (ls(zk) || 'auto')) zoomSel.value = 'auto';
   const bar = el('div', { class: 'webbar' }, addr, zoomSel,
-    el('button', { class: 'btn small', title: '選擇檔案', onclick: () => webPick(w.id) }, '📂'),
-    el('button', { class: 'btn small', title: '重新整理', onclick: () => withPane(p, renderTranscript) }, '⟳'));
+    el('button', { class: 'btn icon', title: '選擇檔案', onclick: () => webPick(w.id) }, ico('folder', 15)),
+    el('button', { class: 'btn icon', title: '重新整理', onclick: () => withPane(p, renderTranscript) }, ico('restart', 15)));
   const src = webSrc(w);
-  if (!src) { T.append(bar, el('div', { class: 'webempty muted' }, '還沒有內容：在上面貼路徑，或按 📂 選擇一個 HTML 檔案。')); return; }
+  if (!src) { T.append(bar, el('div', { class: 'webempty muted' }, '還沒有內容：在上面貼路徑，或按右上的資料夾按鈕選擇一個 HTML 檔案。')); return; }
   // 本機檔案（/lh/，和這個程式同源）不給 allow-same-origin，頁面碰不到這個程式；http(s) 網址是別的來源（不同連線埠），要給才能正常打自己的 API／存 localStorage
   const frame = el('iframe', { class: 'webframe', src, sandbox: 'allow-scripts allow-forms allow-popups allow-modals allow-downloads' + (/^https?:\/\//i.test(src) ? ' allow-same-origin' : '') });
   const view = el('div', { class: 'webview' }, frame);
@@ -690,8 +692,8 @@ function exitFocus() {
 function focusBar() {
   const name = baseName(S.focusCwd) || '(未知)';
   return el('div', { class: 'focusBar', title: S.focusCwd },
-    el('span', { class: 'ft' }, '🎯 專注模式：' + name),
-    el('button', { class: 'btn small', title: '在這個資料夾開新對話', onclick: () => newDraft(S.focusCwd) }, '＋'),
+    el('span', { class: 'ft' }, ico('target', 13), '專注模式：' + name),
+    el('button', { class: 'btn icon small', title: '在這個資料夾開新對話', onclick: () => newDraft(S.focusCwd) }, ico('plus', 14)),
     el('button', { class: 'btn small', title: '退出專注模式（回到原本的列表）', onclick: () => exitFocus() }, '退出'));
 }
 // 專注中，左側列表的內容
@@ -757,7 +759,7 @@ function userGroup(fg, folders) {
   const total = folders.reduce((n, [, f]) => n + f.items.length, 0);
   const box = el('div', { class: 'fgroup' + (collapsed ? ' collapsed' : ''), style: '--fg:' + (fg.color || '#8a8a8a') });
   const head = el('div', { class: 'ghead fghead', title: '右鍵：重新命名／換顏色／解散群組' },
-    el('span', { class: 'caret' }, collapsed ? '▸' : '▾'),
+    caret(collapsed),
     el('span', { class: 'glabel' }, el('span', { class: 'fgname', style: 'background:' + (fg.color || '#8a8a8a') + ';color:' + fgInk(fg.color || '#8a8a8a') }, fg.name)),
     el('span', { class: 'gcount muted' }, folders.length + ' 個資料夾 · ' + total));
   head.onclick = () => { collapsed ? S.collapsed.delete(key) : S.collapsed.add(key); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
@@ -777,8 +779,8 @@ function webUnit() {
   const collapsed = S.collapsed.has(WEB_KEY), pages = webPages();
   const g = el('div', { class: 'group gbracket webgroup' + (collapsed ? ' collapsed' : ''), style: '--bk:' + WEB_COLOR });
   const head = el('div', { class: 'ghead', title: '右鍵：新增頁面' },
-    el('span', { class: 'glabel' }, '🌐 ' + WEB_NAME), el('span', { class: 'gn' }, '(' + pages.length + ')'),
-    el('button', { class: 'gadd', title: '新增一個頁面', onclick: e => { e.stopPropagation(); webAdd(); } }, '＋'));
+    el('span', { class: 'glabel' }, ico('globe', 13), WEB_NAME), el('span', { class: 'gn' }, '(' + pages.length + ')'),
+    el('button', { class: 'gadd', title: '新增一個頁面', onclick: e => { e.stopPropagation(); webAdd(); } }, ico('plus', 13)));
   head.onclick = () => { collapsed ? S.collapsed.delete(WEB_KEY) : S.collapsed.add(WEB_KEY); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
   head.oncontextmenu = e => { e.preventDefault(); webGroupMenu(e.clientX, e.clientY); };
   if (!S.focusKey) dndWire(head, { type: 'webgroup', key: WEB_KEY });
@@ -801,9 +803,9 @@ function group(key, label, cwd, items, showFolder, gid) {
   const br = !!(cwd && !gid);
   const g = el('div', { class: 'group' + (collapsed ? ' collapsed' : '') + (br ? ' gbracket' : ''), style: br ? '--bk:' + folderColor(folderKey(cwd)) : null });
   const head = el('div', { class: 'ghead', title: cwd || '' },
-    ...(br ? [el('span', { class: 'glabel' }, label), el('span', { class: 'gn' }, '(' + items.length + ')')] // 括弧樣式：不要展開三角形，名稱後面直接 (N)
-           : [el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'glabel' }, label), el('span', { class: 'gcount muted' }, items.length)]));
-  if (cwd) head.append(el('button', { class: 'gadd', title: '在此資料夾開新對話', onclick: e => { e.stopPropagation(); newDraft(cwd); } }, '＋'));
+    ...(br ? [el('span', { class: 'glabel' }, deco(label, 13)), el('span', { class: 'gn' }, '(' + items.length + ')')] // 括弧樣式：不要展開三角形，名稱後面直接 (N)
+           : [caret(collapsed), el('span', { class: 'glabel' }, deco(label, 13)), el('span', { class: 'gcount muted' }, items.length)]));
+  if (cwd) head.append(el('button', { class: 'gadd', title: '在此資料夾開新對話', onclick: e => { e.stopPropagation(); newDraft(cwd); } }, ico('plus', 13)));
   head.onclick = () => { collapsed ? S.collapsed.delete(key) : S.collapsed.add(key); ls('cc_collapsed', JSON.stringify([...S.collapsed])); renderSidebar(); };
   if (cwd) head.oncontextmenu = e => { e.preventDefault(); folderMenu(cwd, e.clientX, e.clientY); }; // 資料夾卡片右鍵：資料夾群組
   if (cwd) dndWire(head, { type: 'folder', key: folderKey(cwd), gid: gid || null });
@@ -825,7 +827,7 @@ function item(s, showFolder) {
     el('div', { class: 'sbody' }, el('div', { class: 'stitle' }, S.source === 'all' && s.source === 'desktop' ? el('span', { class: 'srctag', title: '桌面版開的對話' }, '桌面') : null,
         S.renaming === s.id ? renameInput(s) : dispTitle(s)),
       showFolder ? el('div', { class: 'sfolder muted' }, baseName(s.cwd)) : null),
-    s.poke ? el('span', { class: 'spoke', title: `已預約：${new Date(s.poke.at).toLocaleString()} 用${s.poke.acctName}戳這個對話（要求繼續）` }, '⏰' + fmtWhen(s.poke.at)) : null,
+    s.poke ? el('span', { class: 'spoke', title: `已預約：${new Date(s.poke.at).toLocaleString()} 用${s.poke.acctName}戳這個對話（要求繼續）` }, ico('alarm', 11), fmtWhen(s.poke.at)) : null,
     el('span', { class: 'stime muted' }, relTime(s.updatedAt)),
     // 右側狀態點（全部統一在右邊）：黃 = 有問題等你回答、橘閃 = 執行中、藍 = 跑完了還沒看（空位固定保留，標題不會頂到邊）
     el('span', { class: 'sflag' + (wait ? ' wait' : run ? ' run' : UNREAD.has(s.id) ? ' unread' : ''),
@@ -953,7 +955,7 @@ async function deleteSessionUI(s) {
 }
 function showMenu(x, y, items) {
   const m = $('#menu'); m.innerHTML = '';
-  for (const [label, fn, cls] of items) m.append(el('div', { class: 'mi' + (cls ? ' ' + cls : ''), onclick: () => { hideMenu(); fn(); } }, label));
+  for (const [label, fn, cls] of items) { const [ic, txt] = splitLead(label); m.append(el('div', { class: 'mi' + (cls ? ' ' + cls : ''), onclick: () => { hideMenu(); fn(); } }, el('span', { class: 'mic' }, ic ? ico(ic, 14) : null), el('span', { class: 'mlab' }, txt))); }
   m.hidden = false;
   const r = m.getBoundingClientRect();
   m.style.left = Math.min(x, innerWidth - r.width - 8) + 'px'; m.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
@@ -980,7 +982,7 @@ function renderHead() {
   h.title.textContent = S.web ? (w ? webLabel(w) : '') : draft ? '新對話' : s ? dispTitle(s) : '';
   h.cwd.textContent = S.web ? '' : S.cwd ? S.cwd : '';
   h.cwd.hidden = S.web || !S.cwd;
-  h.model.textContent = S.model ? '· ' + S.model : '';
+  h.model.textContent = S.model || '';
   // 視窗最上面那條（Windows 標題列／工作列）永遠顯示軟體名稱，不跟著切換對話變動（頁面 <title> 固定）
   btwRepos(); // 換了對話：/btw 小視窗跟著換成那個對話自己的狀態
 }
@@ -1129,7 +1131,7 @@ function renderAttachments() {
   inActive(() => {
     const a = $('#attachments'); a.innerHTML = '';
     S.attachments.forEach((at, i) => a.append(el('div', { class: 'att' }, el('img', { src: at.url, onclick: () => openViewer(at.url, at.name) }),
-      el('button', { class: 'x', title: '移除', onclick: () => { S.attachments.splice(i, 1); renderAttachments(); } }, '✕'))));
+      el('button', { class: 'x', title: '移除', onclick: () => { S.attachments.splice(i, 1); renderAttachments(); } }, ico('x', 11)))));
     a.hidden = !S.attachments.length;
   });
 }
@@ -1182,7 +1184,7 @@ function renderComposerState() {
   inActive(() => {
     const run = S.cur && S.running.has(S.cur) && !S.draft;
     $('#btnStop').hidden = !run;
-    $('#btnSend').textContent = '送出 ➤';
+    if (!$('#btnSend').querySelector('svg')) $('#btnSend').replaceChildren(el('span', { class: 'blabel' }, '送出'), ico('send', 15));
     $('#btnSend').title = run ? 'Claude 執行中：送出的訊息會先排隊，這一輪結束後自動送出（排隊中的訊息可以按「插話」馬上送進去）' : '送出 (Enter)';
     input.placeholder = run ? 'Claude 正在處理… 現在送出會先排隊，這一輪結束後自動送出' : '輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片)';
     renderQueue();
@@ -1235,11 +1237,11 @@ function renderQueueActive() {
   for (const it of list) {
     const sid = S.cur;
     box.append(el('div', { class: 'qitem' },
-      el('div', { class: 'qtext', title: it.text }, it.text || '（只有圖片）', it.atts.length ? el('span', { class: 'muted small' }, `  🖼×${it.atts.length}`) : null),
+      el('div', { class: 'qtext', title: it.text }, it.text || '（只有圖片）', it.atts.length ? el('span', { class: 'muted small qimg' }, ico('image', 12), '×' + it.atts.length) : null),
       el('div', { class: 'qbtns' },
-        el('button', { class: 'btn small primary', title: '馬上送給 Claude：它做完目前這一步就會看到，並在這一輪一起處理', onclick: () => injectQueued(sid, it.id) }, running ? '插話 ➤' : '送出 ➤'),
+        el('button', { class: 'btn small primary', title: '馬上送給 Claude：它做完目前這一步就會看到，並在這一輪一起處理', onclick: () => injectQueued(sid, it.id) }, running ? '插話' : '送出', ico('send', 12)),
         el('button', { class: 'btn small', title: '拿回輸入框修改（會從排隊中移除）', onclick: () => editQueued(sid, it.id) }, '編輯'),
-        el('button', { class: 'btn icon small', title: '取消這則訊息', onclick: () => dequeue(sid, it.id) }, '✕'))));
+        el('button', { class: 'btn icon small', title: '取消這則訊息', onclick: () => dequeue(sid, it.id) }, ico('x', 13)))));
   }
 }
 
@@ -1258,18 +1260,19 @@ function renderDraft() {
   const p = CTX; // this pane's draft; onchange fires on blur, which can happen after the user pressed another pane
   pathInput.onchange = () => withPane(p, () => { S.cwd = pathInput.value.trim().replace(/^"|"$/g, ''); renderHead(); });
   const box = el('div', { class: 'draft' },
+    el('div', { class: 'draftkick' }, 'NEW SESSION'),
     el('h2', null, '開始新對話'),
     el('div', { class: 'muted' }, '選擇 Claude 要工作的資料夾，然後在下方輸入第一則訊息。'),
     el('div', { class: 'pathrow' }, pathInput,
       el('button', { class: 'btn', onclick: async () => {
         const d = await api('POST', '/api/pick-folder', { initial: S.cwd }).catch(e => (toast(e.message), {}));
         if (d.path) withPane(p, () => { S.cwd = d.path; pathInput.value = d.path; renderHead(); renderTranscript(); });
-      } }, '📁 選擇資料夾…'),
+      } }, ico('folder', 15), '選擇資料夾…'),
       S.noFolder ? el('button', { class: 'btn' + (isNoFolder(S.cwd) ? ' primary' : ''), title: '不指定工作資料夾，單純聊天（所有這類對話共用一個空白資料夾：' + S.noFolder + '）',
-        onclick: () => withPane(p, () => { S.cwd = S.noFolder; pathInput.value = S.noFolder; renderHead(); renderTranscript(); }) }, '💬 不指定資料夾') : null),
-    recent.length ? el('div', { class: 'recent' }, el('div', { class: 'muted small' }, '最近使用'),
+        onclick: () => withPane(p, () => { S.cwd = S.noFolder; pathInput.value = S.noFolder; renderHead(); renderTranscript(); }) }, ico('msg', 15), '不指定資料夾') : null),
+    recent.length ? el('div', { class: 'recent' }, el('div', { class: 'reclabel' }, '最近使用'),
       recent.slice(0, 12).map(c => el('button', { class: 'chip' + (c.toLowerCase() === (S.cwd || '').toLowerCase() ? ' on' : ''), title: c,
-        onclick: () => { S.cwd = c; renderHead(); renderTranscript(); } }, el('b', null, baseName(c)), ' ', el('span', { class: 'muted' }, c)))) : null);
+        onclick: () => { S.cwd = c; renderHead(); renderTranscript(); } }, ico('folder', 14), el('b', null, baseName(c)), el('span', { class: 'muted' }, c)))) : null);
   T.append(box);
 }
 
@@ -1376,7 +1379,7 @@ function appendMsg(m) {
     if (b.type === 'text') {
       insert(longAssistantText(b.text));
     } else if (b.type === 'thinking') {
-      const th = el('details', { class: 'thinking' }, el('summary', null, '💭 思考過程'), el('div', { class: 'ttext' }, b.text));
+      const th = el('details', { class: 'thinking' }, el('summary', null, ico('spark', 13), '思考過程'), el('div', { class: 'ttext' }, b.text));
       const g = openToolGroup(); // thinking between tool calls stays inside the current group
       if (g) g.list.append(th); else insert(th);
     } else if (b.type === 'tool_use') {
@@ -1451,7 +1454,7 @@ function thumb(src, label, filePath, removeOnError) {
   return img;
 }
 
-const TOOL_ICON = { Bash: '⌘', PowerShell: '⌘', Read: '📄', Write: '✍', Edit: '✎', MultiEdit: '✎', NotebookEdit: '✎', Grep: '🔍', Glob: '🔍', WebFetch: '🌐', WebSearch: '🌐', Task: '🤖', Agent: '🤖', TodoWrite: '☑', AskUserQuestion: '❓', ExitPlanMode: '📋' };
+const TOOL_ICON = { Bash: 'terminal', PowerShell: 'terminal', Read: 'file', Write: 'filePlus', Edit: 'pencil', MultiEdit: 'pencil', NotebookEdit: 'pencil', Grep: 'search', Glob: 'search', WebFetch: 'globe', WebSearch: 'globe', Task: 'bot', Agent: 'bot', TodoWrite: 'todo', AskUserQuestion: 'help', ExitPlanMode: 'plan' };
 function toolSummary(b) {
   const i = b.input || {};
   const first = s => String(s || '').split('\n')[0].slice(0, 200);
@@ -1507,13 +1510,13 @@ function renderGroup(g) {
   const names = [...g.names].map(([n, c]) => c > 1 ? `${toolLabel(n)} ×${c}` : toolLabel(n)).join('、');
   g.sum.className = g.pending ? '' : g.errors ? 'err' : 'ok';
   g.sum.innerHTML = '';
-  g.sum.append(...[el('span', { class: 'ticon' }, '⚙'), el('span', { class: 'tname' }, `${g.count} 個工具`), el('span', { class: 'targ' }, names),
+  g.sum.append(...[el('span', { class: 'ticon' }, ico('wrench', 13)), el('span', { class: 'tname' }, `${g.count} 個工具`), el('span', { class: 'targ' }, names),
     g.errors ? el('span', { class: 'tgerr' }, `${g.errors} 個失敗`) : null, el('span', { class: 'tstat' })].filter(Boolean));
 }
 // mcp__Server_Name__tool_name -> tool_name (full name stays in the tooltip)
 function toolLabel(n) { const m = String(n || '').match(/^mcp__.+?__(.+)$/); return m ? m[1] : n; }
 function toolEl(b) {
-  const sum = el('summary', null, el('span', { class: 'ticon' }, TOOL_ICON[b.name] || '⚙'), el('span', { class: 'tname', title: b.name }, toolLabel(b.name)), el('span', { class: 'targ' }, toolSummary(b)), el('span', { class: 'tstat' }));
+  const sum = el('summary', null, el('span', { class: 'ticon' }, ico(TOOL_ICON[b.name] || 'wrench', 13)), el('span', { class: 'tname', title: b.name }, toolLabel(b.name)), el('span', { class: 'targ' }, toolSummary(b)), el('span', { class: 'tstat' }));
   const res = el('div', { class: 'tres' });
   const d = el('details', { class: 'tool' }, sum, el('div', { class: 'tbody' }, toolInputView(b), res));
   const wrap = el('div', { class: 'toolwrap' }, d);
@@ -1543,7 +1546,7 @@ function attachResult(b) {
     } else if (imgs.length) t.wrap.append(el('div', { class: 'thumbs' }, imgs));
   } else if (body.length || imgs.length) {
     if (S.toolMode !== 'hide' && body.length)
-      insert(el('details', { class: 'tool orphan' }, el('summary', { class: b.isError ? 'err' : 'ok' }, el('span', { class: 'ticon' }, '↳'), el('span', { class: 'tname' }, '工具結果')), el('div', { class: 'tbody' }, ...body)));
+      insert(el('details', { class: 'tool orphan' }, el('summary', { class: b.isError ? 'err' : 'ok' }, el('span', { class: 'ticon' }, ico('reply', 13)), el('span', { class: 'tname' }, '工具結果')), el('div', { class: 'tbody' }, ...body)));
     if (imgs.length) insert(el('div', { class: 'thumbs' }, imgs));
   }
 }
@@ -1638,7 +1641,7 @@ function permCard(p) {
   const i = p.input || {};
   if (p.toolName === 'AskUserQuestion' && Array.isArray(i.questions)) {
     const answers = {};
-    const card = el('div', { class: 'perm ask' }, el('div', { class: 'ptitle' }, '❓ Claude 想問你'));
+    const card = el('div', { class: 'perm ask' }, el('div', { class: 'ptitle' }, ico('help', 15), 'Claude 想問你'));
     i.questions.forEach(q => {
       const qd = el('div', { class: 'q' }, el('div', { class: 'qh' }, q.header ? el('span', { class: 'chip' }, q.header) : null, ' ', q.question));
       const opts = el('div', { class: 'qopts' });
@@ -1666,7 +1669,7 @@ function permCard(p) {
     return card;
   }
   if (p.toolName === 'ExitPlanMode') {
-    return el('div', { class: 'perm plan' }, el('div', { class: 'ptitle' }, '📋 Claude 的計畫，確認後開始執行'),
+    return el('div', { class: 'perm plan' }, el('div', { class: 'ptitle' }, ico('plan', 15), 'Claude 的計畫，確認後開始執行'),
       el('div', { class: 'md planbody', html: window.md(i.plan || '') }),
       el('div', { class: 'pbtns' },
         el('button', { class: 'btn primary', onclick: () => answer(p, { allow: true }) }, '核准並開始執行'),
@@ -1675,7 +1678,7 @@ function permCard(p) {
   const view = toolInputView({ name: p.toolName, input: i });
   const hasSug = Array.isArray(p.suggestions) && p.suggestions.length;
   return el('div', { class: 'perm' },
-    el('div', { class: 'ptitle' }, '⚠ 需要你的許可：', el('b', null, p.toolName), p.description ? el('span', { class: 'muted' }, ' — ' + p.description) : null),
+    el('div', { class: 'ptitle' }, ico('alert', 15), '需要你的許可：', el('b', null, p.toolName), p.description ? el('span', { class: 'muted' }, ' — ' + p.description) : null),
     view,
     el('div', { class: 'pbtns' },
       el('button', { class: 'btn primary', onclick: () => answer(p, { allow: true }) }, '允許'),
@@ -1965,7 +1968,7 @@ function accountRows() {
     el('div', { class: 'setrow' },
       el('div', { class: 'setlabel' }, el('span', { class: 'acctkind main' }, '主'), ' ', au.loggedIn ? (au.email || '已登入') : '尚未登入', ' ', acctBadge(main),
         au.loggedIn ? el('div', { class: 'muted small' }, [au.orgName, au.subscriptionType].filter(Boolean).join(' · ')) : null),
-      el('button', { class: 'btn icon small', title: '重新檢查登入狀態', onclick: () => recheckAuth() }, '↻'),
+      el('button', { class: 'btn icon small', title: '重新檢查登入狀態', onclick: () => recheckAuth() }, ico('refresh', 13)),
       el('button', { class: 'btn small' + (au.loggedIn ? '' : ' primary'), title: '開一個 PowerShell 視窗執行 claude auth login（換主帳號也是用這個）', onclick: doLogin }, au.loggedIn ? '換帳號' : '登入'),
       subs.length ? useBtn('default') : null),
     el('div', { class: 'acctsec' }, '副帳號（token）', el('span', { class: 'muted small' }, '用 claude setup-token 產生的長效 token，只存在這台電腦（加密），不影響主帳號的登入；額度不夠時切過去接著聊')),
@@ -1980,7 +1983,7 @@ function accountRows() {
   if (!S.acctForm) {
     rows.push(el('div', { class: 'setrow' },
       el('div', { class: 'setlabel' }, el('div', { class: 'muted small' }, '同一個帳號在不同電腦上使用時，每台電腦各自新增一次')),
-      el('button', { class: 'btn small', onclick: () => { S.acctForm = true; renderSettings(); } }, '＋ 新增副帳號')));
+      el('button', { class: 'btn small', onclick: () => { S.acctForm = true; renderSettings(); } }, ico('plus', 13), '新增副帳號')));
     return rows;
   }
   const lab = el('input', { type: 'text', placeholder: '例如：個人 Max、公司帳號', maxlength: '60' });
@@ -2048,9 +2051,9 @@ function ipEnsure() {
     el('div', { class: 'vhead' },
       el('span', { class: 'vtitle', id: 'ipTitle' }),
       el('button', { class: 'btn small', id: 'ipFit', title: '切換 適合視窗 / 原始尺寸' }, '適合'),
-      el('button', { class: 'btn small', id: 'ipReveal', title: '在檔案總管顯示' }, '📂'),
-      el('button', { class: 'btn small', id: 'ipZoom', title: '放大（燈箱）' }, '⤢'),
-      el('button', { class: 'btn icon small', id: 'ipClose', title: '關閉 (Esc)' }, '✕')),
+      el('button', { class: 'btn icon small', id: 'ipReveal', title: '在檔案總管顯示' }, ico('folder', 14)),
+      el('button', { class: 'btn icon small', id: 'ipZoom', title: '放大（燈箱）' }, ico('expand', 14)),
+      el('button', { class: 'btn icon small', id: 'ipClose', title: '關閉 (Esc)' }, ico('x', 14))),
     el('div', { class: 'ipbody', id: 'ipBody' }, el('img', { id: 'ipImg', alt: '' })),
     el('div', { class: 'ipstrip', id: 'ipStrip' }));
   document.body.append(ipPop);
@@ -2105,9 +2108,9 @@ function lbOpen() {
   if (!lbEl) {
     lbEl = el('div', { class: 'lb', hidden: true },
       el('img', { alt: '' }), el('div', { class: 'lbcap' }),
-      el('button', { class: 'lbbtn lbclose', title: '關閉 (Esc)' }, '✕'),
-      el('button', { class: 'lbbtn lbprev', title: '上一張 (←)' }, '‹'),
-      el('button', { class: 'lbbtn lbnext', title: '下一張 (→)' }, '›'));
+      el('button', { class: 'lbbtn lbclose', title: '關閉 (Esc)' }, ico('x', 20)),
+      el('button', { class: 'lbbtn lbprev', title: '上一張 (←)' }, ico('chevL', 22)),
+      el('button', { class: 'lbbtn lbnext', title: '下一張 (→)' }, ico('chevR', 22)));
     document.body.append(lbEl);
     lbEl.addEventListener('click', e => { if (e.target === lbEl || e.target.classList.contains('lbclose')) lbClose(); });
     lbEl.querySelector('.lbprev').onclick = () => lbStep(-1);
@@ -2294,7 +2297,7 @@ function sideCardEl(c) {
   return el('div', { class: 'sidecard' + (c.isError ? ' err' : ''), id: 'side-' + c.id },
     el('div', { class: 'schead' }, el('span', { class: 'sctitle', title: c.title }, c.title),
       el('span', { class: 'muted small' }, c.state === 'run' ? '' : (c.secs != null ? c.secs + ' 秒 · ' : '') + '不會寫進對話紀錄'),
-      el('button', { class: 'btn icon small', title: '關閉', onclick: () => { const l = sideList(c.key); l.splice(l.indexOf(c), 1); document.getElementById('side-' + c.id)?.remove(); } }, '✕')),
+      el('button', { class: 'btn icon small', title: '關閉', onclick: () => { const l = sideList(c.key); l.splice(l.indexOf(c), 1); document.getElementById('side-' + c.id)?.remove(); } }, ico('x', 13))),
     body);
 }
 function renderSideCards() { for (const c of sideList()) placeCard(sideCardEl(c)); }
@@ -2331,11 +2334,11 @@ function renderPoke() {
     b.disabled = pokeBusy;
     b.innerHTML = '';
     if (p) {
-      b.append('⏰');
+      b.append(ico('alarm', 16));
       b.title = `⏰ 已預約：${fmtWhen(p.at)}（${pokeAcctLabel(p)}）
 ${new Date(p.at).toLocaleString()} 用${p.acctName}送出「額度已重置，請從上次中斷的地方繼續。」\n（${fmtWhen(p.resetsAt * 1000)} 額度重置後 1 分鐘；只有對話那時確實是因為額度用完而中止才會送出）\n按一下取消預約`;
     } else {
-      b.append('⏰');
+      b.append(ico('alarm', 16));
       const a = acctOf(viewAcct());
       b.title = `預約戳：在${a ? acctName(a) : '目前帳號'}的額度重置時間 + 1 分鐘，自動送一則「繼續」給這個對話（只送一次）`;
     }
@@ -2398,8 +2401,8 @@ function renderPop() {
     const row = el('div', { class: 'ppitem' + (i === pop.idx ? ' on' : ''), title: p.text },
       el('div', { class: 'ppbody' }, el('div', { class: 'ppname' }, promptTitle(p)), el('div', { class: 'pptext muted' }, p.text.replace(/\s+/g, ' ').slice(0, 160))),
       el('span', { class: 'ppuses muted small', title: '使用次數' }, p.uses ? p.uses + '次' : ''),
-      el('button', { class: 'btn icon small', title: '編輯', onclick: e => { e.stopPropagation(); editPrompt(p); } }, '✎'),
-      el('button', { class: 'btn icon small', title: '刪除', onclick: e => { e.stopPropagation(); deletePrompt(p); } }, '🗑'));
+      el('button', { class: 'btn icon small', title: '編輯', onclick: e => { e.stopPropagation(); editPrompt(p); } }, ico('pencil', 13)),
+      el('button', { class: 'btn icon small', title: '刪除', onclick: e => { e.stopPropagation(); deletePrompt(p); } }, ico('trash', 13)));
     row.onmousemove = () => { if (pop.idx !== i) { pop.idx = i; list.querySelectorAll('.ppitem').forEach((r, j) => r.classList.toggle('on', j === i)); } };
     row.onclick = e => usePrompt(p, e.ctrlKey);
     list.append(row);
@@ -2588,7 +2591,7 @@ function renderTabs() {
     const wrap = el('div', { class: 'tfold' + (collapsed ? ' collapsed' : '') + (br ? ' tbr' : ''), style: br ? '--bk:' + folderColor(k) : null });
     const chip = el('div', { class: 'tchip ' + (br ? 'tfbr' : 'tfchip'), title: g.cwd + '\n右鍵：資料夾群組選單' },
       ...(br ? [el('span', { class: 'ttl' }, baseName(g.cwd) || '(未知)'), el('span', { class: 'tn' }, '(' + g.items.length + ')')]
-             : [el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, baseName(g.cwd) || '(未知)'), el('span', { class: 'tcount' }, g.items.length)]));
+             : [caret(collapsed), el('span', { class: 'ttl' }, baseName(g.cwd) || '(未知)'), el('span', { class: 'tcount' }, g.items.length)]));
     chip.onclick = toggle(key);
     chip.oncontextmenu = e => { e.preventDefault(); folderMenu(g.cwd, e.clientX, e.clientY); };
     dndWire(chip, { type: 'folder', key: k, gid: gid || null }); chip.__block = wrap;
@@ -2605,7 +2608,7 @@ function renderTabs() {
     const total = u.folders.reduce((n, [, f]) => n + f.items.length, 0);
     const wrap = el('div', { class: 'tunit tg' + (collapsed ? ' collapsed' : ''), style: '--fg:' + color });
     const chip = el('div', { class: 'tchip tgchip', title: '右鍵：重新命名／換顏色／解散群組', style: 'background:' + color + ';color:' + fgInk(color) },
-      el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, fg.name), el('span', { class: 'tcount' }, u.folders.length + '·' + total));
+      caret(collapsed), el('span', { class: 'ttl' }, fg.name), el('span', { class: 'tcount' }, u.folders.length + '·' + total));
     chip.onclick = toggle(key);
     chip.oncontextmenu = e => { e.preventDefault(); groupMenu(fg, e.clientX, e.clientY); };
     dndWire(chip, { type: 'group', key: fg.id }); chip.__block = wrap;
@@ -2616,7 +2619,7 @@ function renderTabs() {
   const webTabUnit = () => { // 橫向分頁列的瀏覽器分頁群組（括弧樣式）
     const collapsed = S.collapsed.has(WEB_KEY), pages = webPages();
     const wrap = el('div', { class: 'tfold tbr webgroup' + (collapsed ? ' collapsed' : ''), style: '--bk:' + WEB_COLOR });
-    const chip = el('div', { class: 'tchip tfbr', title: '右鍵：新增頁面' }, el('span', { class: 'ttl' }, '🌐 ' + WEB_NAME), el('span', { class: 'tn' }, '(' + pages.length + ')'));
+    const chip = el('div', { class: 'tchip tfbr', title: '右鍵：新增頁面' }, el('span', { class: 'ttl' }, ico('globe', 12), WEB_NAME), el('span', { class: 'tn' }, '(' + pages.length + ')'));
     chip.onclick = toggle(WEB_KEY);
     chip.oncontextmenu = e => { e.preventDefault(); webGroupMenu(e.clientX, e.clientY); };
     if (!S.focusKey) { dndWire(chip, { type: 'webgroup', key: WEB_KEY }); chip.__block = wrap; }
@@ -2647,13 +2650,13 @@ function renderTabs() {
   if (!anyV) left.append(el('div', { class: 'tshint', title: '在主／副視窗真的說話過的對話，會在這裡放一張捷徑卡，點一下跳回去' }, '主／副 捷徑'));
   // 2) 右區：Web 分頁式——還沒開始說話的新對話（草稿）
   for (const p of panesOn()) if (!pst(p).web && ((pst(p).draft && !pst(p).draft.vid) || !pst(p).cur && !pst(p).draft)) {
-    const d = el('div', { class: 'tab' + (p === ACTIVE ? ' cur' : ' side') }, el('span', { class: 'ttl' }, '＋ 新對話'));
+    const d = el('div', { class: 'tab' + (p === ACTIVE ? ' cur' : ' side') }, el('span', { class: 'ttl' }, ico('plus', 12), '新對話'));
     d.onclick = () => setActive(p); right.append(d);
   }
   if (S.focusKey) { // 專注模式：右區只剩這個資料夾（資料夾標籤只能退出）＋ 工作群／對話（同樣的分頁邏輯）
     const ws = wsGet();
     const fchip = el('div', { class: 'tchip tfchip', title: S.focusCwd + '\n專注模式：資料夾只能退出（右鍵）' },
-      el('span', { class: 'ttl' }, '🎯 ' + (baseName(S.focusCwd) || '(未知)')), el('span', { class: 'tcount' }, visibleSessions().length));
+      el('span', { class: 'ttl' }, ico('target', 12), baseName(S.focusCwd) || '(未知)'), el('span', { class: 'tcount' }, visibleSessions().length));
     fchip.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['＋ 新對話', () => newDraft(S.focusCwd)], ['⫽ 在副視窗開新對話', () => openDraftRight(S.focusCwd)], ['⮌ 退出專注模式', () => exitFocus()]]); };
     right.append(fchip);
     for (const u of wsStructure()) {
@@ -2675,7 +2678,7 @@ function renderTabs() {
   // 3) 釘選、群組、資料夾（同左側列表）
   if (st.pinned.length) {
     const collapsed = S.collapsed.has('pinned'), wrap = el('div', { class: 'tfold' + (collapsed ? ' collapsed' : '') });
-    const chip = el('div', { class: 'tchip tfchip' }, el('span', { class: 'caret' }, collapsed ? '▸' : '▾'), el('span', { class: 'ttl' }, '📌 釘選'), el('span', { class: 'tcount' }, st.pinned.length));
+    const chip = el('div', { class: 'tchip tfchip' }, caret(collapsed), el('span', { class: 'ttl' }, ico('pin', 12), '釘選'), el('span', { class: 'tcount' }, st.pinned.length));
     chip.onclick = toggle('pinned'); wrap.append(chip);
     if (!collapsed) st.pinned.forEach(s => wrap.append(sessionTab(s, null)));
     right.append(wrap);
@@ -3087,9 +3090,9 @@ function btwEnsure() {
   if (btwPop) return btwPop;
   btwPop = el('div', { class: 'btw' + (btwScale === 2 ? ' btw-lg' : ''), id: 'btwPop', hidden: true },
     el('div', { class: 'btwhd' },
-      el('span', { class: 'btwtt', id: 'btwTitle' }, '💬 順帶一提'),
+      el('span', { class: 'btwic' }, ico('msg', 14)), el('span', { class: 'btwtt', id: 'btwTitle' }, '順帶一提'),
       el('button', { class: 'btn icon small', id: 'btwSize', title: '切換小視窗大小（一半 / 三分之二）' }, btwScale === 2 ? '½' : '⅔'),
-      el('button', { class: 'btn icon small', id: 'btwClose', title: '關閉 (Esc)' }, '✕')),
+      el('button', { class: 'btn icon small', id: 'btwClose', title: '關閉 (Esc)' }, ico('x', 14))),
     el('div', { class: 'btwthread', id: 'btwThread' }),
     el('div', { class: 'btwrow' },
       el('input', { id: 'btwInput', class: 'btwin', type: 'text', placeholder: '順帶問一個問題，Enter 送出（不會寫進對話）…' }),
@@ -3141,7 +3144,7 @@ function btwRepos() {
     btwAnchor = sid; btwThreadRender(); btwIn.value = st.draft || '';
   }
   const s = S.sessions.find(x => x.id === sid);
-  $('#btwTitle').textContent = '💬 順帶一提' + (s ? ' · ' + (s.title || '') : '');
+  $('#btwTitle').textContent = '順帶一提' + (s ? ' · ' + (s.title || '') : '');
   btwPop.hidden = false;
 }
 function btwShow() {
@@ -3171,7 +3174,7 @@ function runBtw(text) {
       btwBusy = Math.max(0, btwBusy - 1); it.state = 'done';
       // 答案存回「那個對話」自己的紀錄；現在剛好顯示的就是它才重畫，不然切回去時就看得到
       if (btwAnchor === sid && btwPop && !btwPop.hidden) btwThreadRender();
-      else { const s = S.sessions.find(x => x.id === sid); toast(`💬 btw 的回答好了，切回「${s ? (s.title || '').slice(0, 20) : '那個對話'}」就看得到`); }
+      else { const s = S.sessions.find(x => x.id === sid); toast(`btw 的回答好了，切回「${s ? (s.title || '').slice(0, 20) : '那個對話'}」就看得到`); }
     });
 }
 function btwSend() {
