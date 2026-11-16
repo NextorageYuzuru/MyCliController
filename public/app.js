@@ -533,6 +533,7 @@ async function wsRefreshSession(s) {
 function wgroupMenu(g, x, y) {
   showMenu(x, y, [
     ['＋ 在這個工作群新增對話', () => wsAddSession(g.id)],
+    ['⫽ 在這個工作群新增對話（副視窗）', () => wsAddSession(g.id, true)],
     ['✎ 重新命名工作群', () => { const n = prompt('工作群名稱', g.name); if (n != null && n.trim()) { g.name = n.trim(); wsSave(); } }],
     ['🎨 換顏色', () => { g.color = FG_COLORS[(FG_COLORS.indexOf(g.color) + 1) % FG_COLORS.length]; wsSave(); }],
     ['解散工作群（對話回到外面）', () => {
@@ -559,24 +560,26 @@ function dispTitle(s) {
   if (s.virtual) { const vc = ws.vcards[s.gid], g = ws.groups.find(x => x.id === s.gid); return (vc && vc.name) || ((g ? g.name : '') + '：（新對話）'); }
   return s.title;
 }
-function wsOpenVirtual(vid) {
+function wsOpenVirtual(vid, toSub) {
   const shown = panesOn().find(p => pst(p).draft && pst(p).draft.vid === vid);
   if (shown) { setActive(shown); return; }
+  if (toSub) { openDraftRight(S.focusCwd, vid); renderSidebar(); return; }
   if (ACTIVE !== PANE.L) setActive(PANE.L);
   withPane(PANE.L, () => newDraft(S.focusCwd, vid));
   renderSidebar();
 }
-function wsAddSession(gid) {
+// toSub: 開在副視窗（沒分割就開分割）
+function wsAddSession(gid, toSub) {
   const ws = wsGet(), g = ws.groups.find(x => x.id === gid); if (!g) return;
   const exGid = Object.keys(ws.vcards)[0], ex = exGid && ws.vcards[exGid];
   if (ex) { // 整個專注工作區同時只允許一張空白卡片：已經有就跳過去
     ws.collapsed = ws.collapsed.filter(k => k !== 'wg:' + exGid); wsSave();
-    toast('專注模式同時只能有一張還沒開始的空白卡片，已跳到那張'); wsOpenVirtual(ex.vid); return;
+    toast('專注模式同時只能有一張還沒開始的空白卡片，已跳到那張'); wsOpenVirtual(ex.vid, toSub); return;
   }
   const vid = 'v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   ws.vcards[gid] = { vid, name: null }; g.sessions.push(vid); // name 還是空的＝等著命名；命名前不算數
   ws.collapsed = ws.collapsed.filter(k => k !== 'wg:' + gid);
-  wsSave(); wsOpenVirtual(vid);
+  wsSave(); wsOpenVirtual(vid, toSub);
   const def = g.name + '：';
   if (S.sbCollapsed) { // 橫向分頁列沒有就地輸入框：用輸入視窗（一定要取名字；取消＝放棄這張卡片）
     let t; for (;;) { t = prompt('新對話的名稱（必填；取消＝放棄）', def); if (t == null) break; t = t.trim(); if (t && t !== def) break; toast('新增對話需要先取名字'); }
@@ -696,7 +699,7 @@ function renderFocusSidebar(list, ss) {
   list.append(focusBar());
   const head = el('div', { class: 'ghead fhx', title: S.focusCwd + '\n專注模式：資料夾卡片只能退出（右鍵）' },
     el('span', { class: 'glabel' }, baseName(S.focusCwd) || '(未知)'), el('span', { class: 'gcount muted' }, ss.length));
-  head.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['⮌ 退出專注模式', () => exitFocus()]]); };
+  head.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['＋ 新對話', () => newDraft(S.focusCwd)], ['⫽ 在副視窗開新對話', () => openDraftRight(S.focusCwd)], ['⮌ 退出專注模式', () => exitFocus()]]); };
   list.append(head);
   const body = el('div', { class: 'fxbody' }), ws = wsGet();
   const wsItem = (s, gid) => { if (s.virtual) return vitem(s); const n = item(s, false); if (S.renaming !== s.id) dndWire(n, { type: 'wsession', sid: s.id, gid: gid || null }); return n; };
@@ -705,7 +708,7 @@ function renderFocusSidebar(list, ss) {
     const g = u.group.g, key = 'wg:' + g.id, collapsed = ws.collapsed.includes(key), color = g.color || '#8a8a8a';
     // 工作群的畫法＝跟「依資料夾」的資料夾區塊一樣：┌─ 名稱 (N)＋群組自己顏色的括弧，被點到的對話前面用同色的「>」
     const box = el('div', { class: 'group gbracket' + (collapsed ? ' collapsed' : ''), style: '--bk:' + color });
-    const gh = el('div', { class: 'ghead', title: '右鍵：新增對話／重新命名／換顏色／解散工作群' },
+    const gh = el('div', { class: 'ghead', title: '右鍵：新增對話（主／副視窗）／重新命名／換顏色／解散工作群' },
       el('span', { class: 'glabel' }, g.name),
       el('span', { class: 'gn' }, '(' + u.group.items.filter(x => !x.virtual).length + ')')); // 空白卡片不計入數量
     gh.onclick = () => wsToggle(key);
@@ -721,8 +724,9 @@ function renderFocusSidebar(list, ss) {
 }
 function folderMenu(cwd, x, y) {
   const key = folderKey(cwd), cur = groupOfFolder(key);
-  if (S.focusKey) { showMenu(x, y, [['⮌ 退出專注模式', () => exitFocus()], ...(cwd ? [['⧉ 複製資料夾路徑', () => copyPath(cwd)]] : [])]); return; } // 專注中：資料夾卡片只能退出（和複製路徑）
+  if (S.focusKey) { showMenu(x, y, [...[['＋ 新對話', () => newDraft(S.focusCwd)], ['⫽ 在副視窗開新對話', () => openDraftRight(S.focusCwd)], ['⮌ 退出專注模式', () => exitFocus()]], ...(cwd ? [['⧉ 複製資料夾路徑', () => copyPath(cwd)]] : [])]); return; } // 專注中：資料夾卡片只能開新對話／退出（和複製路徑）
   const items = [];
+  if (cwd) items.push(['＋ 在這個資料夾開新對話', () => newDraft(cwd)], ['⫽ 在副視窗開新對話', () => openDraftRight(cwd)]);
   if (cwd) items.push(['🎯 進入專注模式（只看這個資料夾）', () => enterFocus(cwd)]);
   if (cwd && !cur) items.push(['🎨 換資料夾顏色', () => cycleFolderColor(key)]);
   items.push(['＋ 新增資料夾群組…', () => newFolderGroup(key)]);
@@ -1384,7 +1388,9 @@ function appendMsg(m) {
 }
 // Very long assistant text (pasted logs, huge listings…) is folded to its first and last few lines, with a button
 // to expand/collapse. The transcript is re-rendered often, so expanded state is remembered by a key of the text.
-const LONG_MIN_LINES = 40, LONG_HEAD = 10, LONG_TAIL = 10;
+// Only real dumps are folded (a normal answer — even a long one with tables — is never touched): 250+ lines.
+// The cut is moved to a blank line so a table / list / paragraph is not split in half.
+const LONG_MIN_LINES = 250, LONG_HEAD = 15, LONG_TAIL = 15, LONG_SNAP = 25;
 const longOpen = new Set();
 function longKey(t) { return t.length + ':' + t.slice(0, 60) + t.slice(-60); }
 function fenceOpenAt(lines) { // true if the given lines end inside an unclosed ``` fence
@@ -1401,14 +1407,18 @@ function longAssistantText(text) {
   const draw = () => {
     wrap.replaceChildren();
     const open = longOpen.has(key);
-    const hidden = lines.length - LONG_HEAD - LONG_TAIL;
+    // head ends / tail starts at a blank line (searched up to LONG_SNAP lines further in), else at the plain count
+    let h = LONG_HEAD, t = lines.length - LONG_TAIL;
+    for (let i = LONG_HEAD; i < LONG_HEAD + LONG_SNAP && i < t; i++) if (!lines[i].trim()) { h = i; break; }
+    for (let i = t; i > t - LONG_SNAP && i > h; i--) if (!lines[i - 1].trim()) { t = i; break; }
+    const hidden = t - h;
     let btn;
     if (open) {
       wrap.append(mk(window.md(text)));
       btn = el('button', { class: 'longbtn' }, `▲ 收起（共 ${lines.length} 行）`);
     } else {
-      const head = lines.slice(0, LONG_HEAD), tail = lines.slice(-LONG_TAIL);
-      const headOpen = fenceOpenAt(head), tailOpen = fenceOpenAt(lines.slice(0, lines.length - LONG_TAIL));
+      const head = lines.slice(0, h), tail = lines.slice(t);
+      const headOpen = fenceOpenAt(head), tailOpen = fenceOpenAt(lines.slice(0, t));
       wrap.append(mk(window.md(head.join('\n') + (headOpen ? '\n```' : ''))));
       wrap.append(el('div', { class: 'longgap' }, `⋯ 省略 ${hidden} 行 ⋯`));
       wrap.append(mk(window.md((tailOpen ? '```\n' : '') + tail.join('\n'))));
@@ -2644,13 +2654,13 @@ function renderTabs() {
     const ws = wsGet();
     const fchip = el('div', { class: 'tchip tfchip', title: S.focusCwd + '\n專注模式：資料夾只能退出（右鍵）' },
       el('span', { class: 'ttl' }, '🎯 ' + (baseName(S.focusCwd) || '(未知)')), el('span', { class: 'tcount' }, visibleSessions().length));
-    fchip.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['⮌ 退出專注模式', () => exitFocus()]]); };
+    fchip.oncontextmenu = e => { e.preventDefault(); showMenu(e.clientX, e.clientY, [['＋ 新對話', () => newDraft(S.focusCwd)], ['⫽ 在副視窗開新對話', () => openDraftRight(S.focusCwd)], ['⮌ 退出專注模式', () => exitFocus()]]); };
     right.append(fchip);
     for (const u of wsStructure()) {
       if (u.s) { right.append(sessionTab(u.s, null, null)); continue; }
       const g = u.group.g, key = 'wg:' + g.id, collapsed = ws.collapsed.includes(key), color = g.color || '#8a8a8a';
       const wrap = el('div', { class: 'tfold tbr' + (collapsed ? ' collapsed' : ''), style: '--bk:' + color });
-      const chip = el('div', { class: 'tchip tfbr', title: '右鍵：新增對話／重新命名／換顏色／解散工作群' },
+      const chip = el('div', { class: 'tchip tfbr', title: '右鍵：新增對話（主／副視窗）／重新命名／換顏色／解散工作群' },
         el('span', { class: 'ttl' }, g.name), el('span', { class: 'tn' }, '(' + u.group.items.filter(x => !x.virtual).length + ')'));
       chip.onclick = () => wsToggle(key);
       chip.oncontextmenu = e => { e.preventDefault(); wgroupMenu(g, e.clientX, e.clientY); };
@@ -3013,6 +3023,14 @@ function openRight(sid) {
   if (R.el.hidden) { R.el.hidden = false; updateSplit(); }
   openSession(sid, R);
   setActive(R);
+}
+// 副視窗開新對話（空白草稿）：有分割就換掉副視窗的內容，沒有就開分割。vid：專注模式工作群的空白卡片
+function openDraftRight(cwd, vid) {
+  const R = PANE.R;
+  if (R.el.hidden) { R.el.hidden = false; updateSplit(); }
+  withPane(R, () => newDraft(cwd, vid));
+  setActive(R);
+  if (ACTIVE === R) input.focus();
 }
 function closeRight() {
   const R = PANE.R;
