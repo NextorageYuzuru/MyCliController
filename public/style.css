@@ -204,7 +204,7 @@ svg.ico { flex: none; display: block; }
 .uhead { display: flex; align-items: center; gap: 6px; min-height: 22px; }
 .utitle { font: 600 10.5px var(--mono); letter-spacing: .06em; color: var(--muted); white-space: nowrap; }
 #uUpdated { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; font: 10px var(--mono); color: var(--faint); }
-.uacct { min-width: 0; max-width: 130px; height: 22px; font-size: 11px; border: 1px solid var(--border); background: var(--bg); color: inherit; border-radius: 5px; padding: 0 4px; cursor: pointer; }
+.uacct { min-width: 0; max-width: 104px; height: 22px; font-size: 11px; border: 1px solid var(--border); background: var(--bg); color: inherit; border-radius: 5px; padding: 0 4px; cursor: pointer; }
 .acctbadge { font-size: 11px; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent); background: var(--accent-soft); border-radius: 5px; padding: 1px 7px; flex-shrink: 0; }
 .acctbadge.bad { color: var(--err); border-color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); font-weight: 400; }
 .uacct.bad { color: var(--err); border-color: var(--err); }
@@ -691,3 +691,25 @@ img.thumb:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--bord
 /* 側欄多選（Ctrl／Shift＋點） */
 .sitem.selected, .sitem.selected:hover { background: color-mix(in srgb, var(--link) 16%, transparent); outline: 1px solid color-mix(in srgb, var(--link) 50%, transparent); outline-offset: -1px; }
 #app.offline #verLine::after { background: var(--err) !important; box-shadow: 0 0 6px var(--err) !important; }
+
+/* 其他帳號用量小卡（用量卡片右邊彈出，同高；每個帳號一欄半圓儀表，高度對齊卡片裡的長條） */
+#uMore { color: var(--muted); }
+#uMore.on { color: var(--accent); background: var(--accent-soft); }
+#uMore svg { transition: transform .15s; }
+#uMore.on svg { transform: translateX(1px); }
+#uFly { position: fixed; z-index: 90; display: flex; padding: 0 4px; background: var(--elev); border: 1px solid var(--border2); border-radius: 9px; box-shadow: var(--shadow-pop); animation: flyin .14s ease-out; }
+@keyframes flyin { from { opacity: 0; transform: translateX(-6px); } }
+.ufcol { position: relative; width: 84px; flex: none; }
+.ufcol + .ufcol { border-left: 1px dashed var(--border); }
+.ufcol.stale { opacity: .5; }
+.ufname { position: absolute; left: 5px; right: 5px; height: 18px; display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 11px; white-space: nowrap; }
+.ufname .acctkind { flex: none; }
+.ufname .ufn { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ufcol.bad .ufn { color: var(--err); }
+.fg { position: absolute; left: 50%; width: 46px; height: 26px; margin-left: -23px; }
+.fg svg { width: 46px; height: 26px; display: block; overflow: visible; }
+.fg .gtrack { fill: none; stroke: var(--panel2); stroke-width: 4; stroke-linecap: round; }
+.fg .gval { fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 60%, transparent)); }
+.fg.warm .gval { stroke: var(--warn); } .fg.hot .gval { stroke: var(--err); }
+.fgpct { position: absolute; left: 0; right: 0; bottom: -2px; text-align: center; font: 600 10.5px var(--mono); font-variant-numeric: tabular-nums; }
+.fg.warm .fgpct { color: var(--warn); } .fg.hot .fgpct { color: var(--err); }

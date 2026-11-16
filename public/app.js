@@ -1818,6 +1818,7 @@ function renderRate() {
   const r = S.rate = (S.rates || {})[viewAcct()] || null;
   renderRailGauges();
   const rows = $('#uRows'); rows.innerHTML = '';
+  renderUMore(); queueMicrotask(() => { if (!$('#uFly').hidden) renderUFly(); }); // 小卡開著：長條重畫完再跟著重畫
   $('#uUpdated').textContent = r && r.receivedAt ? fmtWhen(r.receivedAt) + ' 更新' : '尚無資料，按 ↻';
   $('#uUpdated').title = r && r.receivedAt ? new Date(r.receivedAt).toLocaleString() : '';
   if (!r) return;
@@ -1831,7 +1832,7 @@ function renderRate() {
     // one line: 目前工作階段（4小時11分後重置） 13:50 …… 50%
     const left = v.resetsAt ? (expired ? '（已重置）' : `（${fmtLeft(v.resetsAt - now).replace(/ /g, '')}後重置）`) : '';
     const at = v.resetsAt && !expired ? fmtWhen(v.resetsAt * 1000) : '';
-    rows.append(el('div', { class: 'urow', title: `${RATE_NAMES[k] || k}：已用 ${pct}%${at ? `\n${at} 重置，還有 ${fmtLeft(v.resetsAt - now)}` : ''}` },
+    rows.append(el('div', { class: 'urow', 'data-k': k, title: `${RATE_NAMES[k] || k}：已用 ${pct}%${at ? `\n${at} 重置，還有 ${fmtLeft(v.resetsAt - now)}` : ''}` },
       el('div', { class: 'ulabel' }, el('span', { class: 'uname' }, (RATE_NAMES[k] || k) + left),
         el('span', { class: 'ureset muted' }, at), el('span', { class: 'upct' + level }, pct + '%')),
       el('div', { class: 'ubar' }, el('i', { class: level.trim(), style: `width:${Math.min(100, pct)}%` }))));
@@ -1845,6 +1846,66 @@ function fmtLeft(sec) {
   return `${mm} 分`;
 }
 setInterval(() => renderRate(), 30000); // keep the countdown / "updated at" current
+
+// ---------- 其他帳號用量小卡：用量卡片右上的 > ----------
+// 點一下，在用量卡片右邊彈出一張同高的小卡：除了目前這個帳號以外，每個帳號一欄，用半圓儀表顯示「階段／本週」，
+// 儀表的高度對齊卡片裡那兩條長條。再點一次、按 Esc、或點到別的地方就收起來（只是快速看一眼，不能操作）。
+// 其他帳號的數字只有在那個帳號跑過對話或按過 ↻ 時才會更新：超過 1 小時沒更新的整欄變淡，滑鼠移上去看更新時間。
+const UFLY_KEYS = [['five_hour', '階段'], ['seven_day', '本週']];
+const rateWins = r => (r ? (r.unifiedWindows || (r.rateLimitType ? { [r.rateLimitType]: r } : {})) : {});
+function halfGauge(pct, lv) {
+  const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg'); svg.setAttribute('viewBox', '0 0 40 23');
+  const arc = cls => { const p = document.createElementNS(NS, 'path'); p.setAttribute('d', 'M4 20 A16 16 0 0 1 36 20'); p.setAttribute('pathLength', '100'); p.setAttribute('class', cls); return p; };
+  const val = arc('gval'); val.setAttribute('stroke-dasharray', (pct == null ? 0 : Math.min(100, pct)) + ' 100');
+  svg.append(arc('gtrack')); if (pct > 0) svg.append(val);
+  return el('div', { class: 'fg' + lv }, svg, el('span', { class: 'fgpct' }, pct == null ? '–' : pct + '%'));
+}
+function uflyOthers() { const cur = viewAcct(); return acctList().filter(x => x.id !== cur); }
+function renderUMore() {
+  const b = $('#uMore'), n = uflyOthers().length;
+  b.hidden = !n;
+  if (!n) closeUFly();
+}
+function closeUFly() { $('#uFly').hidden = true; $('#uMore').classList.remove('on'); }
+function renderUFly() {
+  const fly = $('#uFly'), card = $('#usage'), cr = card.getBoundingClientRect(), others = uflyOthers();
+  if (!others.length || !cr.width) { closeUFly(); return; }
+  fly.innerHTML = '';
+  fly.style.left = Math.round(cr.right + 8) + 'px'; fly.style.top = Math.round(cr.top) + 'px'; fly.style.height = Math.round(cr.height) + 'px';
+  // 每一列的垂直中心：帳號名稱對齊卡片標題列；兩個儀表對齊卡片裡的兩條長條（卡片沒資料時平均分配）
+  const mid = r => r.top - cr.top + r.height / 2;
+  const headY = mid($('#usage .uhead').getBoundingClientRect());
+  const ys = UFLY_KEYS.map(([k], i) => {
+    const row = $('#uRows').querySelector(`.urow[data-k="${k}"]`);
+    return row ? mid(row.getBoundingClientRect()) : headY + (cr.height - headY) * (i + 1) / 3;
+  });
+  const now = Date.now() / 1000;
+  for (const x of others) {
+    const r = (S.rates || {})[x.id] || null, wins = rateWins(r);
+    const stale = !r || !r.receivedAt || Date.now() - r.receivedAt > 3600e3;
+    const col = el('div', { class: 'ufcol' + (stale ? ' stale' : '') + (acctBad(x) ? ' bad' : '') });
+    const tip = [`${acctName(x)}${acctBad(x) ? '（' + x.status.text + '）' : ''}`];
+    col.append(el('div', { class: 'ufname', style: `top:${Math.round(headY - 9)}px` }, el('span', { class: 'acctkind' + (x.kind === 'main' ? ' main' : '') }, acctKind(x)), el('span', { class: 'ufn' }, x.label)));
+    UFLY_KEYS.forEach(([k, lab], i) => {
+      const v = wins[k], has = v && v.utilization != null, expired = has && v.resetsAt && v.resetsAt <= now;
+      const pct = has ? (expired ? 0 : Math.round(v.utilization * 100)) : null;
+      const lv = pct >= 90 ? ' hot' : pct >= 75 ? ' warm' : '';
+      const g = halfGauge(pct, lv); g.style.top = Math.round(ys[i] - 13) + 'px';
+      col.append(g);
+      tip.push(`${RATE_NAMES[k]}：` + (has ? `已用 ${pct}%` + (expired ? '（已重置）' : v.resetsAt ? `，${fmtWhen(v.resetsAt * 1000)} 重置` : '') : '尚無資料'));
+    });
+    tip.push(r && r.receivedAt ? `${fmtWhen(r.receivedAt)} 更新` + (stale ? '（超過 1 小時，數字可能已經變了）' : '') : '還沒有這個帳號的用量資料（用它跑過一次對話後就會有）');
+    col.title = tip.join('\n');
+    fly.append(col);
+  }
+}
+$('#uMore').onclick = () => {
+  if (!$('#uFly').hidden) { closeUFly(); return; }
+  $('#uFly').hidden = false; $('#uMore').classList.add('on'); renderUFly();
+};
+document.addEventListener('mousedown', e => { if (!$('#uFly').hidden && !e.target.closest('#uFly') && !e.target.closest('#uMore')) closeUFly(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeUFly(); });
+addEventListener('resize', () => closeUFly());
 
 // Usage numbers arrive for free with every reply while a conversation runs here. The only other way to refresh
 // them is the ↻ button, which sends one tiny Haiku request (claude learns the numbers only from an API response).
@@ -2496,6 +2557,7 @@ $('#btnNewRail').onclick = () => newDraft();
 // 整頁縮進去：收起左側列表，右側（對話區）就多出整個寬度；收起時 » 上的小點代表還有黃／藍點的對話
 function applySidebar(collapsed, init) {
   S.sbCollapsed = collapsed; if (!init) ls('cc_sbcollapsed', collapsed ? '1' : '0');
+  if (collapsed && typeof closeUFly === 'function' && $('#uFly')) closeUFly();
   $('#app').classList.toggle('sbcollapsed', collapsed); $('#sbRail').hidden = !collapsed;
   if (init) return; // 載入階段 PANE 等還沒建好，不能在這裡渲染；之後的啟動流程會 renderSidebar
   renderRailDot(); renderTabs(); btwRepos();
@@ -2701,7 +2763,7 @@ function renderRailGauges() {
     const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg'); svg.setAttribute('viewBox', '0 0 40 23');
     const path = cls => { const p = document.createElementNS(NS, 'path'); p.setAttribute('d', 'M4 20 A16 16 0 0 1 36 20'); p.setAttribute('pathLength', '100'); p.setAttribute('class', cls); return p; };
     const val = path('gval'); val.setAttribute('stroke-dasharray', (has ? Math.min(100, pct) : 0) + ' 100');
-    svg.append(path('gtrack'), val);
+    svg.append(path('gtrack')); if (has && pct > 0) svg.append(val); // 0% 不畫值（圓頭的 0 長度線段會變成兩個小點）
     const tip = has ? RATE_NAMES[k] + '：已用 ' + pct + '%' + (v.resetsAt && !expired ? '\n' + fmtWhen(v.resetsAt * 1000) + ' 重置，還有 ' + fmtLeft(v.resetsAt - now) : '') : RATE_NAMES[k] + '：尚無資料';
     box.append(el('div', { class: 'gauge' + lv, title: tip }, svg, el('div', { class: 'gpct' }, has ? pct + '%' : '–'), el('div', { class: 'glab' }, lab)));
   }
