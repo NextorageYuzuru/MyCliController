@@ -101,7 +101,9 @@ function relTime(ts) {
   if (d < 86400 * 7) return Math.floor(d / 86400) + ' 天';
   const t = new Date(ts); return (t.getMonth() + 1) + '/' + t.getDate();
 }
-function baseName(p) { return (p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p; }
+// 「不指定資料夾」的對話共用的資料夾（伺服器給的路徑）
+const isNoFolder = p => !!(S.noFolder && p && p.replace(/[\\/]+$/, '').toLowerCase() === S.noFolder.toLowerCase());
+function baseName(p) { return isNoFolder(p) ? '無資料夾' : (p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p; }
 function fileUrl(p) { return `/api/file?t=${encodeURIComponent(TOKEN)}&path=${encodeURIComponent(p)}&cwd=${encodeURIComponent(S.cwd || '')}`; }
 function curSession() { return S.sessions.find(s => s.id === S.cur); }
 function nearEl(e) { return e.scrollHeight - e.scrollTop - e.clientHeight < 120; }
@@ -963,7 +965,7 @@ async function loadSessions() {
   const d = await api('GET', '/api/sessions');
   S.sessions = d.sessions;
   for (const s of S.sessions) if (s.running && !S.running.has(s.id)) S.running.set(s.id, { startedAt: Date.now(), activity: '' });
-  renderSidebar(); renderHeads(); renderPoke();
+  renderSidebar(); renderHeads(); renderPoke(); renderAcctView();
 }
 
 // ---------- header (one per pane) ----------
@@ -1150,7 +1152,7 @@ async function send(override) {
       if (S.focusKey && folderKey(S.cwd) !== S.focusKey) { toast('專注模式中只能在這個資料夾作業（要換資料夾請先退出專注模式）'); return; }
       $('#btnSend').disabled = true;
       const vid = pst(p).draft && pst(p).draft.vid; // 這是從工作群的虛擬空白卡片開出來的草稿
-      const d = await api('POST', '/api/sessions', { cwd: S.cwd, ...cfgFromSelectors() });
+      const d = await api('POST', '/api/sessions', { cwd: S.cwd, acct: (S.accounts || {}).active, ...cfgFromSelectors() });
       withPane(p, () => { S.draft = null; S.cur = d.id; S.cwd = d.cwd; S.msgs = []; renderTranscript(); });
       p.st.ckey = 's:' + d.id; // 輸入區的內容跟著升級成這個對話
       if (vid) wsPromote(vid, d.id);
@@ -1164,38 +1166,13 @@ async function send(override) {
       if (useInput) clearComposerOf(p);
       return;
     }
-    if (!(await askAcctBack(id))) return; // switching back was chosen but did not happen: keep the text, send nothing
     if (useInput) clearComposerOf(p);
     withPane(p, () => { S.stick = true; });
-    await api('POST', `/api/sessions/${id}/send`, { text, images, compactFirst: await askCompactFirst(id) });
+    await api('POST', `/api/sessions/${id}/send`, { text, images });
   } catch (e) { toast('送出失敗: ' + e.message, 6000); }
   finally { $('#btnSend').disabled = false; input.focus(); }
 }
 $('#btnSend').onclick = () => send();
-// The conversation last ran on another account whose 5-hour quota is still mostly unused (the server decides:
-// 70%+ left, account fine): offer to switch back to it, so one conversation does not hop between accounts.
-// Returns false only when switching back was chosen but did not happen (then nothing is sent).
-async function askAcctBack(id) {
-  let c; try { c = await api('GET', `/api/sessions/${id}/acctcheck`); } catch { return true; }
-  if (!c || !c.suggest) return true;
-  if (!confirm(`這個對話上次是用${c.lastName}聊的（5 小時額度還剩 ${c.left}%），現在選的是${c.curName}。\n\n` +
-    `同一段對話換帳號，第一則訊息會讓新帳號重新讀取整段上下文，比較吃額度。\n\n` +
-    `・確定：切換回${c.lastName}再送出（之後所有新訊息都改用它）\n` +
-    `・取消：照樣用${c.curName}送出`)) return true;
-  return switchAccount(c.last);
-}
-// A long conversation that last ran on another account: offer to compact it there first (that account still has
-// it cached and pays for it), so the account in use only reads a short summary. The server decides when to offer.
-async function askCompactFirst(id) {
-  let c; try { c = await api('GET', `/api/sessions/${id}/compactcheck`); } catch { return false; }
-  if (!c || !c.suggest) return false;
-  const k = Math.round(c.tokens / 1000), ago = c.lastAt ? Math.max(1, Math.round((Date.now() - c.lastAt) / 60000)) : null;
-  return confirm(`這段對話上次是用${c.from}執行的，目前上下文約 ${k}k tokens。\n` +
-    `直接用${c.to}接著聊，第一則訊息會讓${c.to}重新讀取整段上下文，比平常吃更多額度。\n\n` +
-    `要先用${c.from}自動壓縮（/compact）再送出嗎？\n\n` +
-    `・確定：先用${c.from}壓縮（用的是${c.from}的額度；它 ${ago || '?'} 分鐘前才用過這段對話，還有快取，比較便宜），完成後自動用${c.to}送出你的訊息。壓縮會讓 Claude 只記得重點摘要\n` +
-    `・取消：不壓縮，直接用${c.to}送出`);
-}
 $('#btnStop').onclick = () => S.cur && api('POST', `/api/sessions/${S.cur}/stop`).catch(e => toast(e.message));
 function renderComposerState() {
   inActive(() => {
@@ -1208,7 +1185,7 @@ function renderComposerState() {
   });
 }
 // everything the composer shows for the active pane
-function refreshComposer() { syncComposers(); inActive(() => { $('#composer').hidden = !!S.web; syncSelectors(); renderCtxActive(); renderAttachments(); renderComposerState(); renderPoke(); if (!S.web) autosize(); }); } // 輸入框藏起來時量到的高度是 0：重新顯示後要重算，否則會縮成一條細線
+function refreshComposer() { syncComposers(); inActive(() => { $('#composer').hidden = !!S.web; syncSelectors(); renderCtxActive(); renderAttachments(); renderComposerState(); renderPoke(); if (!S.web) autosize(); }); renderAcctView(); } // 輸入框藏起來時量到的高度是 0：重新顯示後要重算，否則會縮成一條細線
 
 // ---------- message queue ----------
 // While Claude works, sent messages wait here (per session) and go out by themselves when the turn ends.
@@ -1283,7 +1260,9 @@ function renderDraft() {
       el('button', { class: 'btn', onclick: async () => {
         const d = await api('POST', '/api/pick-folder', { initial: S.cwd }).catch(e => (toast(e.message), {}));
         if (d.path) withPane(p, () => { S.cwd = d.path; pathInput.value = d.path; renderHead(); renderTranscript(); });
-      } }, '📁 選擇資料夾…')),
+      } }, '📁 選擇資料夾…'),
+      S.noFolder ? el('button', { class: 'btn' + (isNoFolder(S.cwd) ? ' primary' : ''), title: '不指定工作資料夾，單純聊天（所有這類對話共用一個空白資料夾：' + S.noFolder + '）',
+        onclick: () => withPane(p, () => { S.cwd = S.noFolder; pathInput.value = S.noFolder; renderHead(); renderTranscript(); }) }, '💬 不指定資料夾') : null),
     recent.length ? el('div', { class: 'recent' }, el('div', { class: 'muted small' }, '最近使用'),
       recent.slice(0, 12).map(c => el('button', { class: 'chip' + (c.toLowerCase() === (S.cwd || '').toLowerCase() ? ' on' : ''), title: c,
         onclick: () => { S.cwd = c; renderHead(); renderTranscript(); } }, el('b', null, baseName(c)), ' ', el('span', { class: 'muted' }, c)))) : null);
@@ -1725,8 +1704,8 @@ function handleEvent(ev) {
         S.running.set(r.sid, { startedAt: r.startedAt, activity: r.activity });
         const pm = new Map(); for (const p of r.perms || []) pm.set(p.requestId, p); S.perms.set(r.sid, pm);
       }
-      if (ev.accounts) { S.rate = ev.rate || null; renderAccounts(ev.accounts); renderRate(); }
-      if (ev.rate) renderRate(ev.rate); if (ev.auth) renderAuth(ev.auth);
+      if (ev.accounts) { S.rates = ev.rates || {}; renderAccounts(ev.accounts); }
+      if (ev.rate) renderRate(); if (ev.auth) renderAuth(ev.auth);
       loadSessions().catch(() => {});
       if (S.helloCount++) for (const p of panesOn()) { const st = pst(p); if (st.cur && !st.draft && !st.loading) openSession(st.cur, p); } // resync after a reconnect
       break;
@@ -1793,8 +1772,8 @@ function handleEvent(ev) {
       if (!(ev.result || {}).stopped && (!shown.length || !document.hasFocus())) { markUnread(ev.sid); renderSidebar(); }
       if (!visibleHere && !(ev.result || {}).stopped) notify('Claude 完成了', (S.sessions.find(s => s.id === ev.sid) || {}).title || '');
       break;
-    case 'rate': renderRate(ev.rate); break;
-    case 'accounts': S.rate = ev.rate || null; renderAccounts(ev.accounts); renderRate(); break;
+    case 'rate': if (ev.id) (S.rates = S.rates || {})[ev.id] = ev.rate; renderRate(); break;
+    case 'accounts': if (ev.rates) S.rates = ev.rates; renderAccounts(ev.accounts); break;
     case 'acctWarn': acctWarn(ev, inShown); break;
     case 'auth': renderAuth(ev.auth); break;
     case 'prompts': loadPrompts(); break;
@@ -1822,9 +1801,8 @@ function fmtWhen(ms) {
   const hm = d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0');
   return d.toDateString() === now.toDateString() ? hm : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm;
 }
-function renderRate(r) {
-  if (r) S.rate = r;
-  r = S.rate;
+function renderRate() {
+  const r = S.rate = (S.rates || {})[viewAcct()] || null;
   renderRailGauges();
   const rows = $('#uRows'); rows.innerHTML = '';
   $('#uUpdated').textContent = r && r.receivedAt ? fmtWhen(r.receivedAt) + ' 更新' : '尚無資料，按 ↻';
@@ -1861,7 +1839,7 @@ let usageBusy = false;
 async function refreshUsage() {
   if (usageBusy) return; usageBusy = true;
   $('#uRefresh').classList.add('spin'); $('#uRefresh').disabled = true;
-  try { const d = await api('POST', '/api/usage/refresh'); renderRate(d.rate); }
+  try { const d = await api('POST', '/api/usage/refresh', { id: viewAcct() }); (S.rates = S.rates || {})[d.id] = d.rate; renderRate(); }
   catch (e) { toast('無法更新用量: ' + e.message, 6000); }
   finally { usageBusy = false; $('#uRefresh').classList.remove('spin'); $('#uRefresh').disabled = false; }
 }
@@ -1879,26 +1857,42 @@ function recheckAuth() { return api('GET', '/api/auth').then(d => { renderAuth(d
 // ---------- accounts ----------
 // 主帳號 = the CLI login (same as claude in PowerShell); 副帳號 = `claude setup-token` tokens kept by the server.
 // Every state is allowed (you can switch to an account that is logged out / out of quota); the UI just says so.
-// The usage box always shows the account in use; switching applies to every message sent from then on.
+// Each conversation stays on its own account (s.acct, kept by the server). The account box in the corner shows the
+// account of the conversation in the active pane — or, for a new conversation, the account new ones start on
+// (S.accounts.active). Changing it inside a conversation moves only that conversation (after a confirm).
 const acctList = () => ((S.accounts || {}).list || []);
 const acctOf = id => acctList().find(x => x.id === id);
 const acctKind = x => (x && x.kind === 'main' ? '主' : '副');
 const acctName = x => (x ? `${x.kind === 'main' ? '主帳號' : '副帳號'}「${x.label}」` : '');
 const acctBad = x => x && x.status && x.status.code !== 'ok';
+// the conversation shown in the active pane (null for a new one / a web card)
+function viewSession() { return PANE.L ? inActive(() => (!S.draft && !S.web ? curSession() : null)) : null; }
+function viewAcct() {
+  const a = S.accounts || {}, s = viewSession();
+  return s && s.acct && acctOf(s.acct) ? s.acct : a.active;
+}
 function renderAccounts(a) {
   if (!a) return;
   S.accounts = a;
-  const sel = $('#uAcct'); sel.innerHTML = '';
-  for (const x of a.list) sel.append(el('option', { value: x.id }, `${acctKind(x)}｜${x.label}` + (acctBad(x) ? `（${x.status.text}）` : '')));
-  sel.value = a.active; sel.hidden = a.list.length < 2;
+  renderAcctView();
   if (typeof renderPoke === 'function' && PANE.L) renderPoke(); // the lamp names the account a new booking would use
-  sel.classList.toggle('bad', acctBad(acctOf(a.active)));
-  renderAcctAlert();
   if (!$('#settingsModal').hidden) renderSettings();
+}
+// the corner: account selector, its alert and its usage, for the conversation shown
+function renderAcctView() {
+  const a = S.accounts; if (!a) return;
+  const sel = $('#uAcct'), cur = viewAcct(), s = viewSession();
+  sel.innerHTML = '';
+  for (const x of a.list) sel.append(el('option', { value: x.id }, `${acctKind(x)}｜${x.label}` + (acctBad(x) ? `（${x.status.text}）` : '')));
+  sel.value = cur; sel.hidden = a.list.length < 2;
+  sel.title = s ? '這個對話固定使用的帳號（換這裡只會改這個對話）' : '新對話要用的帳號';
+  sel.classList.toggle('bad', acctBad(acctOf(cur)));
+  renderAcctAlert();
+  renderRate();
 }
 // sidebar alert for the account in use: what is wrong and what to do
 function renderAcctAlert() {
-  const box = $('#authAlert'), x = acctOf((S.accounts || {}).active);
+  const box = $('#authAlert'), x = acctOf(viewAcct());
   box.innerHTML = '';
   if (!x || !acctBad(x)) { box.hidden = true; return; }
   const others = acctList().filter(y => y.id !== x.id && !acctBad(y));
@@ -1909,31 +1903,27 @@ function renderAcctAlert() {
     x.status.code === 'invalid' ? el('button', { class: 'btn small', onclick: openSettings }, '設定') : null, sw);
   box.hidden = false;
 }
-// Strict: before switching, list everything that could go wrong (account status, conversations still running on
-// the old account, ones kept alive by background tasks) and ask. Nothing to warn about → switch right away.
 const ACCT_WHY = { loggedOut: '主帳號的 CLI 目前沒有登入，送出訊息會失敗（請先到 ⚙ 設定 → 帳號按「登入」）。', invalid: '這個副帳號的 token 先前被拒絕過（可能過期或已撤銷），送出訊息可能會失敗。' };
+// The account new conversations start on (no confirm: nothing running changes).
+async function setDefaultAccount(id) {
+  try { const d = await api('POST', '/api/accounts/use', { id }); renderAccounts(d.accounts); toast('之後新開的對話會用' + acctName(acctOf(id))); return true; }
+  catch (e) { toast(e.message, 6000); renderAccounts(S.accounts); return false; }
+}
+// From the corner selector (or the alert's button): inside a conversation, move only that one; otherwise set the
+// account for new conversations. Returns whether `id` is now the account shown.
 async function switchAccount(id) {
-  if (S.accounts && id === S.accounts.active) return true; // returns whether `id` is now the account in use
+  const s = viewSession();
+  if (!s) return setDefaultAccount(id);
+  if (id === viewAcct()) return true;
+  const x = acctOf(id), st = (x && x.status) || {};
+  const warn = st.code && st.code !== 'ok' ? '\n\n⚠ ' + (ACCT_WHY[st.code] || `這個帳號目前${st.text}，送出訊息可能會失敗。`) : '';
+  if (!confirm(`確定把這個對話改用${acctName(x)}嗎？${warn}`)) { renderAcctView(); return false; }
   try {
-    const imp = await api('GET', '/api/accounts/impact?to=' + encodeURIComponent(id));
-    const warns = [];
-    const st = imp.target || {};
-    if (st.code && st.code !== 'ok') warns.push('⚠ ' + (ACCT_WHY[st.code] || `這個帳號目前${st.text}，送出訊息可能會失敗。`));
-    const turning = imp.runs.filter(r => r.turnActive), bg = imp.runs.filter(r => !r.turnActive && r.bgTasks);
-    const li = r => `　・${r.title.slice(0, 40)}（${r.acct}${r.bgTasks ? `，背景工作 ${r.bgTasks} 個` : ''}）`;
-    if (turning.length) warns.push(`⚠ 這些對話正在執行，這一輪會繼續用原本的帳號跑完；執行中插話送出的訊息也還是用原本的帳號：\n${turning.map(li).join('\n')}`);
-    if (bg.length) warns.push(`⚠ 這些對話還有背景工作在跑，程式不會結束：之後送給它們的訊息仍會用原本的帳號（如果原本的帳號額度用完會繼續失敗），直到按停止為止：\n${bg.map(li).join('\n')}`);
-    let stopBg = false;
-    if (warns.length) {
-      warns.push('另外：換帳號後，每段對話的第一則訊息會重新讀取整段上下文，比平常吃更多新帳號的額度。');
-      if (!confirm(`切換到${imp.to}？\n\n${warns.join('\n\n')}\n\n確定要切換嗎？`)) { renderAccounts(S.accounts); return false; }
-      if (bg.length) stopBg = confirm(`要現在停止上面 ${bg.length} 個有背景工作的對話，讓它們之後也改用${imp.to}嗎？\n\n按「確定」：停止（背景工作會中斷）\n按「取消」：不停止，它們繼續用原本的帳號`);
-    }
-    const d = await api('POST', '/api/accounts/use', { id, stopBg });
-    renderAccounts(d.accounts);
-    toast(`已切換到${imp.to}` + (d.stopped ? `，已停止 ${d.stopped} 個有背景工作的對話` : '') + (turning.length ? '。正在執行的對話這一輪結束後才會換過去' : '，之後送出的訊息都用這個帳號'), 7000);
+    const d = await api('POST', `/api/sessions/${s.id}/acct`, { acct: id });
+    s.acct = id; renderAcctView(); renderPoke();
+    toast(`這個對話改用${acctName(x)}` + (d.live ? '（它的程式還在執行，要等這一輪／背景工作結束後才會換過去）' : ''), 6000);
     return true;
-  } catch (e) { toast(e.message, 6000); renderAccounts(S.accounts); return false; }
+  } catch (e) { toast(e.message, 6000); renderAcctView(); return false; }
 }
 $('#uAcct').onchange = e => switchAccount(e.target.value);
 // a problem found after something was sent (quota used up, token rejected, CLI logged out / changed):
@@ -1957,8 +1947,8 @@ const acctBadge = x => {
 function accountRows() {
   const a = S.accounts || { active: 'default', list: [] }, au = S.auth || {};
   const main = acctOf('default') || { id: 'default', kind: 'main', label: au.email || 'CLI 登入帳號', status: { code: au.loggedIn ? 'ok' : 'loggedOut', text: au.loggedIn ? '' : '尚未登入' } };
-  const useBtn = id => a.active === id ? el('span', { class: 'acctbadge' }, '使用中')
-    : el('button', { class: 'btn small', title: '之後送出的訊息改用這個帳號', onclick: () => switchAccount(id) }, '使用');
+  const useBtn = id => a.active === id ? el('span', { class: 'acctbadge', title: '新開的對話用這個帳號（已經開的對話各自固定自己的帳號）' }, '新對話預設')
+    : el('button', { class: 'btn small', title: '之後新開的對話用這個帳號（已經開的對話不受影響）', onclick: () => setDefaultAccount(id) }, '設為新對話預設');
   const subs = acctList().filter(y => y.kind === 'sub');
   const rows = [
     el('div', { class: 'acctsec' }, '主帳號（CLI 登入）', el('span', { class: 'muted small' }, '和 PowerShell 裡的 claude 是同一個登入；在任何終端機登入／登出或換帳號，這裡都會自動跟著更新')),
@@ -2331,11 +2321,12 @@ function renderPoke() {
     b.disabled = pokeBusy;
     b.innerHTML = '';
     if (p) {
-      b.append('⏰ ' + fmtWhen(p.at), el('span', { class: 'pokeacct' }, ' · ' + pokeAcctLabel(p)));
-      b.title = `已預約戳這個對話：${new Date(p.at).toLocaleString()} 用${p.acctName}送出「額度已重置，請從上次中斷的地方繼續。」\n（${fmtWhen(p.resetsAt * 1000)} 額度重置後 1 分鐘；只有對話那時確實是因為額度用完而中止才會送出）\n按一下取消預約`;
+      b.append('⏰');
+      b.title = `⏰ 已預約：${fmtWhen(p.at)}（${pokeAcctLabel(p)}）
+${new Date(p.at).toLocaleString()} 用${p.acctName}送出「額度已重置，請從上次中斷的地方繼續。」\n（${fmtWhen(p.resetsAt * 1000)} 額度重置後 1 分鐘；只有對話那時確實是因為額度用完而中止才會送出）\n按一下取消預約`;
     } else {
       b.append('⏰');
-      const a = acctOf((S.accounts || {}).active);
+      const a = acctOf(viewAcct());
       b.title = `預約戳：在${a ? acctName(a) : '目前帳號'}的額度重置時間 + 1 分鐘，自動送一則「繼續」給這個對話（只送一次）`;
     }
   });
@@ -3050,13 +3041,13 @@ updateFocusMarks();
   if (!TOKEN) { document.body.innerHTML = '<p style="padding:2em">缺少存取權杖。請用 start.vbs 啟動。</p>'; return; }
   try {
     const d = await api('GET', '/api/init');
-    S.prefs = d.prefs; S.sessions = d.sessions;
+    S.prefs = d.prefs; S.sessions = d.sessions; S.noFolder = d.noFolder || null;
     checkVersion(d.version || null);
     if (!GROUP_MODES[S.prefs.groupBy]) S.prefs.groupBy = 'folder';
     if ((S.prefs.windowTheme || 'system') !== (ls('cc_theme') || 'system')) saveWindowTheme(ls('cc_theme') || 'system');
     renderSortBtn();
-    S.rate = d.rate || null; renderAccounts(d.accounts);
-    renderAuth(d.auth); renderRate(d.rate);
+    S.rates = d.rates || {}; renderAccounts(d.accounts);
+    renderAuth(d.auth);
   } catch (e) { toast('無法連線到伺服器: ' + e.message, 10000); }
   connect();
   loadPrompts();

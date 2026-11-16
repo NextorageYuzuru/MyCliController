@@ -12,6 +12,8 @@ const { spawn, execFile, execFileSync } = require('child_process');
 const PORT = Number(process.env.CLICTRL_PORT) || 47821;
 const APP_DIR = __dirname;
 const DATA_DIR = path.join(APP_DIR, 'data');
+// 「不指定資料夾」的對話都開在這一個資料夾（像 Desktop 的無專案對話）；第一次用時才建立
+const NOFOLDER_DIR = path.join(os.homedir(), '.claude-controller', 'no-folder');
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
 const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
@@ -95,6 +97,10 @@ function flushStore() {
 }
 function saveStore() { clearTimeout(saveTimer); saveTimer = setTimeout(flushStore, 300); }
 function rec(id) { return store.sessions[id] || (store.sessions[id] = { id }); }
+// Each conversation stays on its own account (r.acct): set when it is created (the account chosen for new
+// conversations), changed only from inside the conversation. One that never had one (older, or started in the CLI)
+// follows the default until it first runs here, then keeps that one. A removed account → the default.
+function sessAcct(id) { const r = store.sessions[id]; return r && r.acct && ACC.exists(r.acct) ? r.acct : ACC.active(); }
 
 // ---------- transcript scanning (~/.claude/projects/*/<id>.jsonl) ----------
 async function readSlice(fp, start, len) {
@@ -239,7 +245,7 @@ async function listSessions() {
       pinned: !!r.pinned, hidden: r.hidden != null ? !!r.hidden : archived, archived, source, app: !!r.createdAt, scratch: isScratch(cwd),
       running: !!(runs.get(id) && runs.get(id).turnActive),
       model: r.model ?? null, effort: r.effort ?? null, permissionMode: r.permissionMode ?? null,
-      poke: pokeView(r.poke),
+      poke: pokeView(r.poke), acct: sessAcct(id),
     });
   }
   return out.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -386,6 +392,8 @@ function learnWindow(run, modelUsage) {
 const runs = new Map(); // session id -> run
 // ---------- accounts (主帳號 = CLI login, 副帳號 = setup-token tokens): see accounts.js ----------
 const ACC = require('./accounts')({ store, saveStore, log, broadcast: (...x) => broadcast(...x), cleanEnv: () => cleanEnv(), claude: CLAUDE, killTree: pid => killTree(pid) });
+// v1.9.51: conversations stay on their own account. Ones that ran here before keep the account they last ran on.
+for (const r of Object.values(store.sessions)) if (r && !r.acct && r.lastAcct && ACC.exists(r.lastAcct)) r.acct = r.lastAcct;
 function cleanEnv() {
   const e = { ...process.env };
   for (const k of Object.keys(e)) if (k === 'CLAUDECODE' || /^CLAUDE_CODE_(ENTRYPOINT|SSE_PORT|SESSION|PARENT|CHILD)/i.test(k) || /^CLAUDE_AGENT_SDK/i.test(k)) delete e[k];
@@ -420,10 +428,11 @@ async function sendMessage(id, text, images, opts = {}) {
       return { deferred: true };
     }
   }
+  if (!r.acct || !ACC.exists(r.acct)) r.acct = sessAcct(id); // pinned from its first run on
   if (run && !run.exited) {
-    // still on the account it was started with (the user switched since): say so, it is easy to miss
-    if (run.acct !== ACC.active())
-      broadcast({ type: 'notice', sid: id, text: `這則訊息仍用${ACC.fullName(run.acct)}送出：這個對話的程式還在執行（${run.turnActive ? '這一輪還沒結束' : '有背景工作'}），要等它結束或按停止後，才會改用目前選的${ACC.fullName(ACC.active())}` });
+    // still on the account it was started with (the conversation was switched since): say so, it is easy to miss
+    if (!opts.acct && run.acct !== r.acct)
+      broadcast({ type: 'notice', sid: id, text: `這則訊息仍用${ACC.fullName(run.acct)}送出：這個對話的程式還在執行（${run.turnActive ? '這一輪還沒結束' : '有背景工作'}），要等它結束或按停止後，才會改用${ACC.fullName(r.acct)}` });
     // claude's process is still alive: write it in right away, like the Desktop app does.
     // - mid-turn: claude picks it up as soon as the current step finishes and answers within the same turn (插話)
     // - turn over but the process lives on (e.g. a background task is running): it starts a new turn at once
@@ -436,7 +445,7 @@ async function sendMessage(id, text, images, opts = {}) {
     return;
   }
   const fp = await findFile(id);
-  const acct = opts.acct || ACC.active(), env = await ACC.env(acct);
+  const acct = opts.acct || r.acct, env = await ACC.env(acct);
   r.lastAcct = acct; r.lastAcctAt = Date.now(); // which account this conversation last ran on (see compactCheck)
   const exists = !!fp && fs.existsSync(fp);
   const startOffset = exists ? (await fsp.stat(fp)).size : 0;
@@ -549,7 +558,7 @@ async function runSide(b) {
     timeoutMs = 90000;
   }
   log('side', b.kind, cwd, args.join(' '));
-  const acct = ACC.active(), env = await ACC.env(acct);
+  const acct = sid ? sessAcct(sid) : ACC.active(), env = await ACC.env(acct);
   return new Promise(resolve => {
     const p = spawn(CLAUDE_BIN, CLAUDE.pre.concat(args), { cwd, env, windowsHide: true });
     let out = '', err = '';
@@ -844,26 +853,6 @@ async function sendWithCompact(id, text, images) {
   return { compacting: true };
 }
 
-// ---------- the conversation last ran on another account that still has plenty of quota ----------
-// Sending into a conversation whose last account (r.lastAcct) is not the one in use: if that account is fine and its
-// 5-hour window still has ACCT_BACK_LEFT or more left, offer to switch back to it (mixing accounts in one
-// conversation costs a full context re-read on the other account). Unknown usage → not offered.
-const ACCT_BACK_LEFT = 0.7;
-function acctCheck(id) {
-  const no = { suggest: false };
-  const r = store.sessions[id], run = runs.get(id);
-  if (!r || (run && !run.exited)) return no; // a live process keeps its own account anyway
-  const last = r.lastAcct, cur = ACC.active();
-  if (!last || last === cur || !ACC.exists(last) || ACC.status(last).code !== 'ok') return no;
-  const rt = ACC.rate(last); if (!rt) return no;
-  const now = Date.now() / 1000, wins = rt.unifiedWindows || (rt.rateLimitType ? { [rt.rateLimitType]: rt } : {});
-  const live = w => w && !(w.resetsAt && w.resetsAt <= now); // a window past its reset counts as unused
-  if (Object.values(wins).some(w => live(w) && (w.status === 'rejected' || w.utilization >= 0.9))) return no;
-  const five = wins.five_hour; if (!five) return no;
-  const left = live(five) ? 1 - (five.utilization || 0) : 1;
-  if (left < ACCT_BACK_LEFT) return no;
-  return { suggest: true, last, lastName: ACC.fullName(last), curName: ACC.fullName(cur), left: Math.round(left * 100) };
-}
 
 // ---------- 預約戳 (poke): one message, sent once, when the chosen account's quota resets ----------
 // The user presses the lamp in a conversation: the account in use then, and its reset time + 1 minute, are kept on
@@ -899,7 +888,7 @@ function pokeResetSec(acct) {
 }
 function pokeView(p) { return p ? { at: p.at, acct: p.acct, acctName: ACC.exists(p.acct) ? ACC.fullName(p.acct) : '（已移除的帳號）', resetsAt: p.resetsAt } : null; }
 async function setPoke(id) {
-  const acct = ACC.active();
+  const acct = sessAcct(id);
   let sec = pokeResetSec(acct);
   // out of quota already: the account module noted until when (from the failed turn) — no request needed
   if (!sec) { const s = ACC.status(acct); if (s.code === 'limited' && s.until > Date.now() / 1000) sec = s.until; }
@@ -1180,15 +1169,39 @@ function openConsole(cwd, command, env = cleanEnv()) {
   spawn('cmd.exe', [`/c start "Claude" powershell.exe -NoExit -Command "${command}"`], { cwd, windowsVerbatimArguments: true, windowsHide: true, detached: true, stdio: 'ignore', env }).unref();
 }
 let authInfo = null, authAt = 0, authPending = null;
+// `claude auth status` reports the email cached in the shared ~/.claude.json, which other runs (e.g. one on a sub
+// account's token) can overwrite — the real login in .credentials.json does not change. So the email is checked
+// against the token itself (profile endpoint, no model call, no usage), once per access token.
+const authEmailCache = { tok: null, email: null, org: null };
+async function verifyAuthEmail(a) {
+  if (!a || !a.loggedIn) return;
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(CLAUDE_DIR, '.credentials.json'), 'utf8')).claudeAiOauth;
+    const tok = c && c.accessToken; if (!tok) return;
+    if (authEmailCache.tok !== tok) {
+      const r = await fetch('https://api.anthropic.com/api/oauth/profile', { headers: { Authorization: 'Bearer ' + tok, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(8000) });
+      if (!r.ok) return;
+      const j = await r.json(); const email = j && j.account && j.account.email; if (!email) return;
+      Object.assign(authEmailCache, { tok, email, org: j.organization && j.organization.name || null });
+    }
+    if (a.email !== authEmailCache.email) {
+      log('auth email', a.email || '?', '(cached in ~/.claude.json) ->', authEmailCache.email, '(from the token)');
+      a.email = authEmailCache.email; if (authEmailCache.org) a.orgName = authEmailCache.org;
+    }
+  } catch {}
+}
 function refreshAuth() {
   if (authPending) return authPending;
   authPending = new Promise(resolve => {
     execFile(CLAUDE_BIN, CLAUDE.pre.concat(['auth', 'status']), { env: cleanEnv(), windowsHide: true, encoding: 'utf8', timeout: 20000 }, (err, out) => {
       const prev = authInfo && authInfo.loggedIn;
       try { authInfo = JSON.parse(out); } catch { authInfo = { loggedIn: false, error: (err && err.message) || 'unknown' }; }
-      authAt = Date.now(); authPending = null;
+      authAt = Date.now();
+      verifyAuthEmail(authInfo).then(() => {
+      authPending = null;
       if (prev !== authInfo.loggedIn) log('auth', authInfo.loggedIn ? 'logged in ' + (authInfo.email || '') : 'not logged in');
       broadcast({ type: 'auth', auth: authInfo }); ACC.onCliAuth(authInfo); resolve(authInfo);
+      });
     });
   });
   return authPending;
@@ -1274,20 +1287,21 @@ const server = http.createServer(async (req, res) => {
       res.write(': hello\n\n');
       clients.add(res);
       const running = [...runs.values()].filter(r => r.turnActive).map(r => ({ sid: r.id, startedAt: r.startedAt, activity: r.activity, perms: [...r.perms.values()] }));
-      res.write('data: ' + JSON.stringify({ type: 'hello', running, rate: ACC.rate(ACC.active()), accounts: ACC.view(), auth: authInfo, version: APP_VERSION }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ type: 'hello', running, rate: ACC.rate(ACC.active()), rates: ACC.rates(), accounts: ACC.view(), auth: authInfo, version: APP_VERSION }) + '\n\n');
       req.on('close', () => { clients.delete(res); lastClientSeen = Date.now(); });
       if (Date.now() - authAt > 30000) refreshAuth(); // window opened/reloaded: make sure the account shown is current
       return;
     }
-    if (p === '/api/init' && M === 'GET') return json(res, 200, { version: APP_VERSION, prefs: store.prefs, auth: authInfo, rate: ACC.rate(ACC.active()), accounts: ACC.view(), home: os.homedir(), sessions: await listSessions() });
+    if (p === '/api/init' && M === 'GET') return json(res, 200, { version: APP_VERSION, prefs: store.prefs, auth: authInfo, rate: ACC.rate(ACC.active()), rates: ACC.rates(), accounts: ACC.view(), home: os.homedir(), noFolder: NOFOLDER_DIR, sessions: await listSessions() });
     if (p === '/api/sessions' && M === 'GET') return json(res, 200, { sessions: await listSessions() });
     if (p === '/api/sessions' && M === 'POST') {
       const b = await readBody(req);
       const cwd = path.resolve(normPath(b.cwd));
+      if (cwd.toLowerCase() === NOFOLDER_DIR.toLowerCase()) fs.mkdirSync(NOFOLDER_DIR, { recursive: true });
       if (!b.cwd || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) return json(res, 400, { error: '資料夾不存在: ' + (b.cwd || '') });
       const id = crypto.randomUUID();
       const r = rec(id);
-      Object.assign(r, { cwd, createdAt: Date.now(), updatedAt: Date.now(), model: b.model || '', effort: b.effort || '', permissionMode: b.permissionMode || store.prefs.permissionMode });
+      Object.assign(r, { cwd, createdAt: Date.now(), updatedAt: Date.now(), model: b.model || '', effort: b.effort || '', permissionMode: b.permissionMode || store.prefs.permissionMode, acct: ACC.exists(b.acct) ? b.acct : ACC.active() });
       store.prefs.lastCwd = cwd; saveStore();
       broadcast({ type: 'sessions' });
       return json(res, 200, { id, cwd });
@@ -1341,7 +1355,7 @@ const server = http.createServer(async (req, res) => {
       setTimeout(reopenWindow, 150);
       return;
     }
-    if (p === '/api/usage/refresh' && M === 'POST') return json(res, 200, { rate: await ACC.refreshRate() });
+    if (p === '/api/usage/refresh' && M === 'POST') { const b = await readBody(req), id = ACC.exists(b.id) ? b.id : ACC.active(); return json(res, 200, { id, rate: await ACC.refreshRate(id) }); }
     if (p === '/api/accounts' && M === 'GET') return json(res, 200, { accounts: ACC.view(), rates: ACC.rates() });
     if (p === '/api/accounts' && M === 'POST') { const b = await readBody(req); return json(res, 200, { accounts: await ACC.add(b.label, b.token) }); }
     if (p === '/api/accounts/impact' && M === 'GET') return json(res, 200, switchImpact(String(u.searchParams.get('to') || '')));
@@ -1434,7 +1448,14 @@ const server = http.createServer(async (req, res) => {
         const r = b.compactFirst ? await sendWithCompact(id, String(b.text || ''), imgs) : await sendMessage(id, String(b.text || ''), imgs);
         return json(res, 200, { ok: true, ...(r || {}) });
       }
-      if (act === 'acctcheck' && M === 'GET') return json(res, 200, acctCheck(id));
+      if (act === 'acct' && M === 'POST') {
+        const b = await readBody(req), to = String(b.acct || '');
+        if (!ACC.exists(to)) return json(res, 400, { error: '找不到帳號' });
+        const r = rec(id), run = runs.get(id); r.acct = to; saveStore();
+        log('session account', id, ACC.label(to));
+        broadcast({ type: 'sessions' });
+        return json(res, 200, { ok: true, acct: to, live: !!(run && !run.exited && run.acct !== to && !(run.inputClosed && !run.turnActive)) });
+      }
       if (act === 'poke' && M === 'POST') return json(res, 200, { poke: await setPoke(id) });
       if (act === 'poke' && M === 'DELETE') return json(res, 200, { ok: cancelPoke(id) });
       if (act === 'compactcheck' && M === 'GET') return json(res, 200, await compactCheck(id));
@@ -1443,7 +1464,7 @@ const server = http.createServer(async (req, res) => {
       if (act === 'terminal' && M === 'POST') {
         const cwd = sessionCwd(id); if (!cwd || !fs.existsSync(cwd)) return json(res, 400, { error: '資料夾不存在' });
         const exists = !!(await findFile(id));
-        openConsole(cwd, exists ? `claude --resume ${id}` : 'claude', await ACC.env());
+        openConsole(cwd, exists ? `claude --resume ${id}` : 'claude', await ACC.env(sessAcct(id)));
         return json(res, 200, { ok: true });
       }
     }

@@ -94,13 +94,13 @@ module.exports = function createAccounts({ store, saveStore, log, broadcast, cle
         .concat(store.accounts.map(a => one(a.id, { addedAt: a.addedAt }))),
     };
   }
-  const changed = () => { saveStore(); broadcast({ type: 'accounts', accounts: view(), rate: rates[active()] || null }); };
+  const changed = () => { saveStore(); broadcast({ type: 'accounts', accounts: view(), rate: rates[active()] || null, rates }); };
   // a problem the user has to know about; sid: the conversation it happened in (shown there too)
   function warn(id, level, text, sid) {
     log('account warn', id, level, text.replace(/\n/g, ' '));
     broadcast({ type: 'acctWarn', acct: id, level, text, sid: sid || null });
   }
-  const switchHint = id => store.accounts.length || id !== MAIN ? '可以在左下「用量」旁的選單切換到其他帳號，再送一次訊息就能接著聊（對話紀錄共用）。' : '可以到 ⚙ 設定 → 帳號新增副帳號，額度用完時切換過去接著聊。';
+  const switchHint = id => store.accounts.length || id !== MAIN ? '可以在這個對話裡用左下「用量」旁的選單把它換到其他帳號，再送一次訊息就能接著聊（對話紀錄共用）。' : '可以到 ⚙ 設定 → 帳號新增副帳號，額度用完時切換過去接著聊。';
 
   // ---------- usage ----------
   // rate_limit_event from any claude we ran on this account: keep it, and update the limited / near-limit state
@@ -130,8 +130,8 @@ module.exports = function createAccounts({ store, saveStore, log, broadcast, cle
       }
     }
     saveStore();
-    if (id === active()) broadcast({ type: 'rate', rate: rates[id] });
-    broadcast({ type: 'accounts', accounts: view(), rate: rates[active()] || null });
+    broadcast({ type: 'rate', id, rate: rates[id], active: id === active() });
+    broadcast({ type: 'accounts', accounts: view(), rate: rates[active()] || null, rates });
     return rates[id];
   }
   // A turn (or a one-off run) ended with an error: tell the user what it means for the account.
