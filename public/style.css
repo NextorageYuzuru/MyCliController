@@ -18,8 +18,9 @@
   --ok: #15924a; --err: #d92626; --warn: #c27803; --warnbg: #fdf6e7; --link: #2563eb;
   --shadow-pop: 0 1px 2px rgba(16,20,28,.06), 0 14px 36px rgba(16,20,28,.16);
   --shadow-card: 0 1px 2px rgba(16,20,28,.05), 0 6px 20px -10px rgba(16,20,28,.18);
-  --mono: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", Consolas, "MS Gothic", monospace;
-  --sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft JhengHei UI", "Yu Gothic UI", system-ui, sans-serif;
+  /* 英數用 Segoe UI Variable／Cascadia，中文（含全形標點）用隨附的 Noto Sans TC 思源黑體（public/fonts），沒載到時退回微軟正黑體 */
+  --mono: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", Consolas, "Noto Sans TC", "Microsoft JhengHei UI", monospace;
+  --sans: "Segoe UI Variable Text", "Segoe UI", "Noto Sans TC", "Microsoft JhengHei UI", system-ui, sans-serif;
   color-scheme: light;
 }
 /* Theme: 設定 → 主題. <html data-theme="light|dark"> forces one; without it the system setting decides. */

@@ -60,7 +60,7 @@ const KEEP_ALIVE = ARGV.has('--keep-alive');
 const IDLE_EXIT_MS = 15000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const IMG_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
-const STATIC_TYPES = { '.json': 'application/json; charset=utf-8', '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon' };
+const STATIC_TYPES = { '.json': 'application/json; charset=utf-8', '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
 
 // Internal version (public/version.json), bumped on every change. Read once at start: this is the version of the
 // code this server process runs. The page compares it with the file on disk and warns when the server is older.
@@ -1244,7 +1244,8 @@ async function serveStatic(p, res) {
   if (!fp.startsWith(PUBLIC_DIR + path.sep)) { res.writeHead(403); return res.end(); }
   try {
     const data = await fsp.readFile(fp);
-    res.writeHead(200, { 'Content-Type': STATIC_TYPES[path.extname(fp).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    // 字型檔不會變（換字型會換檔名），讓瀏覽器快取，不必每次重新整理都重抓
+    res.writeHead(200, { 'Content-Type': STATIC_TYPES[path.extname(fp).toLowerCase()] || 'application/octet-stream', 'Cache-Control': p.startsWith('/fonts/') ? 'max-age=31536000, immutable' : 'no-cache' });
     res.end(data);
   } catch { res.writeHead(404); res.end('not found'); }
 }
