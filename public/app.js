@@ -1102,36 +1102,141 @@ input.addEventListener('input', () => {
   if (c) { cmd.carry = null; openCmd(c[1]); } else if (cmd.open && cmd.carry == null) closeCmd();
 });
 input.addEventListener('paste', e => {
-  const files = [...(e.clipboardData && e.clipboardData.files || [])].filter(f => f.type.startsWith('image/'));
+  const files = [...(e.clipboardData && e.clipboardData.files || [])];
   if (files.length) { e.preventDefault(); files.forEach(addAttachment); }
 });
 $('#main').addEventListener('dragover', e => { e.preventDefault(); });
 $('#main').addEventListener('drop', e => {
   e.preventDefault();
-  const files = [...(e.dataTransfer && e.dataTransfer.files || [])];
-  const imgs = files.filter(f => f.type.startsWith('image/'));
-  imgs.forEach(addAttachment);
-  if (files.length > imgs.length) toast('只支援拖放圖片；其他檔案請直接在訊息裡寫路徑');
+  const dt = e.dataTransfer; if (!dt) return;
+  // folders show up as files too, but their contents can't be read or copied from the page
+  const items = [...(dt.items || [])].filter(it => it.kind === 'file');
+  const isDir = items.map(it => { try { const en = it.webkitGetAsEntry && it.webkitGetAsEntry(); return !!(en && en.isDirectory); } catch { return false; } });
+  let dirs = 0;
+  [...(dt.files || [])].forEach((f, i) => { if (isDir[i]) dirs++; else addAttachment(f); });
+  if (dirs) toast('資料夾不能附加：請把資料夾路徑貼在訊息裡（檔案總管網址列可以複製路徑）', 6000);
 });
 $('#btnAttach').onclick = () => $('#fileInput').click();
 $('#fileInput').onchange = e => { [...e.target.files].forEach(addAttachment); e.target.value = ''; };
-function addAttachment(file) {
-  const fr = new FileReader(), p = composerPane(), k = composerKey(p);
-  fr.onload = () => {
-    const url = fr.result; const m = url.match(/^data:([^;]+);base64,(.*)$/);
-    if (!m) return;
-    if (!/^image\/(png|jpeg|gif|webp)$/.test(m[1])) { toast('只支援 PNG / JPEG / GIF / WebP'); return; }
-    const at = { mediaType: m[1], data: m[2], url, name: file.name || 'image' };
-    if (composerKey(p) !== k) { if (k) { const d = DRAFTS.get(k) || { text: '', atts: [] }; d.atts.push(at); DRAFTS.set(k, d); } return; } // 讀檔期間已切到別張卡片：存回原本那張
-    withPane(p, () => { S.attachments.push(at); renderAttachments(); });
-  };
-  fr.readAsDataURL(file);
+
+// Every attachment can go to Claude in one of two ways (at.mode):
+//   'body' — the file itself, for the kinds the API reads natively:
+//              image — PNG / JPEG / GIF / WebP             { mediaType, data (base64), url }
+//              pdf   — sent as a PDF document block         { kind: 'pdf', data (base64) }
+//              text  — any plain-text file (code, md, csv…) { kind: 'text', text }
+//   'path' — a copy is saved under ~/.claude-controller/attachments (the page can't see where a dropped file
+//            really is) and that path is added to the message; Claude reads it with its own tools. Anything the
+//            API can't take (Word/Excel, zip, too big…) is { kind: 'other' } and can only go this way.
+// Common fields: { name, size, file (the File, for copying), mode, bodyOk, why (why body isn't possible), path (once copied) }
+const ATT_IMG_TYPES = /^image\/(png|jpeg|gif|webp)$/;
+const ATT_PDF_MAX = 20 * 1024 * 1024, ATT_TEXT_MAX = 512 * 1024; // the API takes ~32 MB per request (base64 adds 1/3)
+const ATT_PATH_MAX = 1024 * 1024 * 1024;
+// extensions that are text even when not UTF-8 (then read as Big5, the usual legacy encoding on Taiwanese Windows)
+const ATT_TEXT_EXT = /\.(txt|md|markdown|csv|tsv|log|json|jsonl|xml|html?|css|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|c|h|cc|cpp|hpp|cs|php|sh|bash|ps1|psm1|bat|cmd|sql|ya?ml|toml|ini|cfg|conf|env|properties|vue|svelte|lua|pl|r|swift|dart|scala|tex|srt|vtt|svg|gitignore|dockerfile|makefile)$/i;
+const fmtBytes = n => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB' : n < 1073741824 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1073741824).toFixed(2) + ' GB';
+function readAs(file, how) {
+  return new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error); fr[how](file); });
+}
+// bytes -> string, or null when it does not look like text
+function decodeText(buf, name) {
+  const u = new Uint8Array(buf);
+  if (u[0] === 0xFF && u[1] === 0xFE) return new TextDecoder('utf-16le').decode(u.subarray(2));
+  if (u[0] === 0xFE && u[1] === 0xFF) return new TextDecoder('utf-16be').decode(u.subarray(2));
+  if (u.subarray(0, 65536).includes(0)) return null; // NUL bytes: binary
+  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(u); } catch {}
+  return ATT_TEXT_EXT.test(name) ? new TextDecoder('big5').decode(u) : null;
+}
+const NO_BODY = '這種檔案 Claude 不能直接讀本體（只支援圖片、PDF、文字檔）';
+// the body form of a file, or { kind: 'other', why } when it can only be attached as a path
+async function readFileBody(file, name, size) {
+  if (ATT_IMG_TYPES.test(file.type)) {
+    const url = await readAs(file, 'readAsDataURL'), m = url.match(/^data:([^;]+);base64,(.*)$/);
+    return m ? { mediaType: m[1], data: m[2], url } : { kind: 'other', why: '讀不到圖片內容' };
+  }
+  if (file.type === 'application/pdf' || /\.pdf$/i.test(name)) {
+    if (size > ATT_PDF_MAX) return { kind: 'other', why: `PDF 超過 ${fmtBytes(ATT_PDF_MAX)}，不能直接附加本體` };
+    const url = await readAs(file, 'readAsDataURL'), m = url.match(/^data:[^;]*;base64,(.*)$/);
+    if (!m || !atob(m[1].slice(0, 8)).startsWith('%PDF')) return { kind: 'other', why: '不是有效的 PDF' };
+    return { kind: 'pdf', data: m[1] };
+  }
+  if (file.type.startsWith('image/')) return { kind: 'other', why: '圖片本體只支援 PNG / JPEG / GIF / WebP' };
+  if (size > ATT_TEXT_MAX) return { kind: 'other', why: ATT_TEXT_EXT.test(name) ? `文字檔超過 ${fmtBytes(ATT_TEXT_MAX)}，不能直接附加本體` : NO_BODY };
+  const text = decodeText(await readAs(file, 'readAsArrayBuffer'), name);
+  if (text == null) return { kind: 'other', why: NO_BODY };
+  if (!text.trim()) return { kind: 'other', why: '檔案是空的' };
+  return { kind: 'text', text };
+}
+async function makeAttachment(file) {
+  const name = file.name || 'file', size = file.size;
+  const b = await readFileBody(file, name, size), bodyOk = !b.why;
+  if (!bodyOk && size > ATT_PATH_MAX) throw new Error(`「${name}」太大（${fmtBytes(size)}）：附加路徑上限 ${fmtBytes(ATT_PATH_MAX)}`);
+  return { ...b, name, size, file, bodyOk, mode: bodyOk ? 'body' : 'path' };
+}
+async function addAttachment(file) {
+  const p = composerPane(), k = composerKey(p);
+  let at;
+  try { at = await makeAttachment(file); } catch (e) { toast(e.message, 6000); return; }
+  if (composerKey(p) !== k) { if (k) { const d = DRAFTS.get(k) || { text: '', atts: [] }; d.atts.push(at); DRAFTS.set(k, d); } return; } // 讀檔期間已切到別張卡片：存回原本那張
+  withPane(p, () => { S.attachments.push(at); renderAttachments(); });
+}
+// copy an attachment to ~/.claude-controller/attachments (once) and return the copy's path
+// (a copy already on its way is shared, so switching to 路徑 and then sending doesn't copy twice; a failed copy can be retried)
+function uploadAtt(at) {
+  if (at.path) return Promise.resolve(at.path);
+  if (!at.copying) at.copying = (async () => {
+    const r = await fetch('/api/upload?name=' + encodeURIComponent(at.name), { method: 'POST', headers: { 'x-token': TOKEN, 'content-type': 'application/octet-stream' }, body: at.file });
+    if (!r.ok) { let msg = r.statusText; try { msg = (await r.json()).error || msg; } catch {} throw new Error(`「${at.name}」複製失敗：${msg}`); }
+    at.copyErr = '';
+    return (at.path = (await r.json()).path);
+  })().catch(e => { at.copyErr = e.message; throw e; }).finally(() => { at.copying = null; });
+  return at.copying;
+}
+// a 路徑 attachment is copied as soon as it is in that mode, so the bar can show the real path
+function startCopy(at) {
+  if (at.path || at.copying || at.copyErr) return; // after a failure it waits for the user's 重試 click
+  uploadAtt(at).catch(e => toast(e.message, 6000)).finally(renderAttachments);
+}
+// The paths of 'path' attachments go at the end of the message under this heading (appendMsg turns them back
+// into chips when showing the conversation).
+const ATT_PATH_HEAD = '附加檔案（路徑）：';
+const ATT_PATH_RE = /(?:^|\n\n)附加檔案（路徑）：\n((?:- [^\n]+(?:\n|$))+)\s*$/;
+// text + attachments -> what /send takes: { text, images } (copies the 'path' attachments first)
+async function sendPayload(text, atts) {
+  const paths = [];
+  for (const a of atts) if (a.mode === 'path') paths.push(await uploadAtt(a));
+  const images = atts.filter(a => a.mode !== 'path').map(a => a.kind === 'pdf' ? { kind: 'pdf', data: a.data, name: a.name }
+    : a.kind === 'text' ? { kind: 'text', text: a.text, name: a.name } : { mediaType: a.mediaType, data: a.data });
+  if (paths.length) text = (text ? text + '\n\n' : '') + ATT_PATH_HEAD + '\n' + paths.map(x => '- ' + x).join('\n');
+  return { text, images };
+}
+// a file chip (attachment bar, sent messages): icon + name + type/size. f.path: a copied file (click: show it in Explorer)
+function fileChip(f) {
+  const type = f.path ? '路徑' : f.kind === 'pdf' ? 'PDF' : f.kind === 'text' ? '文字' : '檔案';
+  return el('div', { class: 'fchip' + (f.path ? ' link' : ''), title: (f.path || f.name) + (f.size ? '　' + fmtBytes(f.size) : '') + (f.path ? '\n（點一下在檔案總管中顯示）' : ''), onclick: f.path ? () => reveal(f.path) : null },
+    ico(f.path ? 'folder' : 'file', 15), el('span', { class: 'fname' }, f.name), el('span', { class: 'fmeta' }, type + (f.size ? ' · ' + fmtBytes(f.size) : '')));
 }
 function renderAttachments() {
   inActive(() => {
     const a = $('#attachments'); a.innerHTML = '';
-    S.attachments.forEach((at, i) => a.append(el('div', { class: 'att' }, el('img', { src: at.url, onclick: () => openViewer(at.url, at.name) }),
-      el('button', { class: 'x', title: '移除', onclick: () => { S.attachments.splice(i, 1); renderAttachments(); } }, ico('x', 11)))));
+    S.attachments.forEach((at, i) => {
+      const img = !!at.url;
+      const seg = (mode, label, tip) => el('button', { class: at.mode === mode ? 'on' : '', title: tip, disabled: mode === 'body' && !at.bodyOk, onclick: () => { at.mode = mode; renderAttachments(); } }, label);
+      const modeBar = el('div', { class: 'amode', title: at.bodyOk ? '' : at.why + '，只能附加路徑' },
+        seg('body', '本體', at.bodyOk ? '把檔案內容直接送給 Claude' : at.why),
+        seg('path', '路徑', '複製一份到本機（~/.claude-controller/attachments），把路徑附在訊息裡，讓 Claude 自己讀'));
+      // 路徑 mode: the slot shows just the copy's path as plain text (cut off when too long)
+      let view;
+      if (at.mode === 'path') {
+        startCopy(at);
+        view = at.path ? el('div', { class: 'apath', title: at.path + '\n（點一下在檔案總管中顯示）', onclick: () => reveal(at.path) }, at.path)
+          : at.copyErr ? el('div', { class: 'apath err', title: at.copyErr + '\n（點一下重試）', onclick: () => { at.copyErr = ''; renderAttachments(); } }, '複製失敗，點一下重試：' + at.name)
+          : el('div', { class: 'apath muted' }, '複製中… ' + at.name);
+      } else view = img ? el('img', { src: at.url, onclick: () => openViewer(at.url, at.name) }) : fileChip({ kind: at.kind, name: at.name, size: at.size });
+      a.append(el('div', { class: 'att' + (img ? '' : ' file') + (at.mode === 'path' ? ' as-path' : '') },
+        view,
+        modeBar,
+        el('button', { class: 'x', title: '移除', onclick: () => { S.attachments.splice(i, 1); renderAttachments(); } }, ico('x', 11))));
+    });
     a.hidden = !S.attachments.length;
   });
 }
@@ -1148,9 +1253,8 @@ async function send(override) {
   const text = useInput ? input.value.trim() : override;
   if (!text && !(useInput && S.attachments.length)) return;
   const atts = useInput ? S.attachments.slice() : [];
-  const images = atts.map(a => ({ mediaType: a.mediaType, data: a.data }));
   // commands the app handles itself (/btw, /usage, /context, /clear, /model, /effort, /rename)
-  const sc = !images.length && text.match(/^\/([\w:.-]+)(?:\s+([\s\S]*))?$/);
+  const sc = !atts.length && text.match(/^\/([\w:.-]+)(?:\s+([\s\S]*))?$/);
   if (sc && runAppCommand(sc[1].toLowerCase(), (sc[2] || '').trim())) { if (useInput) { input.value = ''; autosize(); } closeCmd(); input.focus(); return; }
   try {
     if (S.draft) {
@@ -1172,9 +1276,11 @@ async function send(override) {
       if (useInput) clearComposerOf(p);
       return;
     }
+    $('#btnSend').disabled = true;
+    const payload = await sendPayload(text, atts); // 「路徑」的附件先複製好；複製失敗時輸入區的內容還在
     if (useInput) clearComposerOf(p);
     withPane(p, () => { S.stick = true; });
-    await api('POST', `/api/sessions/${id}/send`, { text, images });
+    await api('POST', `/api/sessions/${id}/send`, payload);
   } catch (e) { toast('送出失敗: ' + e.message, 6000); }
   finally { $('#btnSend').disabled = false; input.focus(); }
 }
@@ -1186,7 +1292,7 @@ function renderComposerState() {
     $('#btnStop').hidden = !run;
     if (!$('#btnSend').querySelector('svg')) $('#btnSend').replaceChildren(el('span', { class: 'blabel' }, '送出'), ico('send', 15));
     $('#btnSend').title = run ? 'Claude 執行中：送出的訊息會先排隊，這一輪結束後自動送出（排隊中的訊息可以按「插話」馬上送進去）' : '送出 (Enter)';
-    input.placeholder = run ? 'Claude 正在處理… 現在送出會先排隊，這一輪結束後自動送出' : '輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片)';
+    input.placeholder = run ? 'Claude 正在處理… 現在送出會先排隊，這一輪結束後自動送出' : '輸入訊息… (Enter 送出，Shift+Enter 換行，可貼上/拖放圖片、PDF、文字檔)';
     renderQueue();
   });
 }
@@ -1211,7 +1317,7 @@ function dequeue(sid, qid) {
 }
 function postQueued(sid, it) {
   panesShowing(sid).forEach(p => withPane(p, () => { S.stick = true; }));
-  return api('POST', `/api/sessions/${sid}/send`, { text: it.text, images: it.atts.map(a => ({ mediaType: a.mediaType, data: a.data })) })
+  return sendPayload(it.text, it.atts).then(payload => api('POST', `/api/sessions/${sid}/send`, payload))
     .catch(e => { toast('送出失敗: ' + e.message, 6000); S.queue.set(sid, [it].concat(qOf(sid))); renderQueue(); });
 }
 function injectQueued(sid, qid) { const it = dequeue(sid, qid); if (it) postQueued(sid, it); }
@@ -1237,7 +1343,7 @@ function renderQueueActive() {
   for (const it of list) {
     const sid = S.cur;
     box.append(el('div', { class: 'qitem' },
-      el('div', { class: 'qtext', title: it.text }, it.text || '（只有圖片）', it.atts.length ? el('span', { class: 'muted small qimg' }, ico('image', 12), '×' + it.atts.length) : null),
+      el('div', { class: 'qtext', title: it.text }, it.text || '（只有附件）', it.atts.length ? el('span', { class: 'muted small qimg' }, ico(it.atts.some(a => a.kind) ? 'file' : 'image', 12), '×' + it.atts.length) : null),
       el('div', { class: 'qbtns' },
         el('button', { class: 'btn small primary', title: '馬上送給 Claude：它做完目前這一步就會看到，並在這一輪一起處理', onclick: () => injectQueued(sid, it.id) }, running ? '插話' : '送出', ico('send', 12)),
         el('button', { class: 'btn small', title: '拿回輸入框修改（會從排隊中移除）', onclick: () => editQueued(sid, it.id) }, '編輯'),
@@ -1361,16 +1467,26 @@ function appendMsg(m) {
   if (m.role === 'system') { insert(el('div', { class: 'sysline muted' }, m.text)); return; }
   if (m.role === 'task') { for (const n of m.notes || []) insert(taskCard(n)); return; }
   if (m.role === 'user') {
-    const texts = [], imgs = [];
+    const texts = [], imgs = [], files = [];
     for (const b of m.blocks) {
       if (b.type === 'tool_result') attachResult(b);
       else if (b.type === 'text') texts.push(b.text);
       else if (b.type === 'image') imgs.push(b.src);
+      else if (b.type === 'file') files.push(b);
     }
-    if (texts.length || imgs.length) {
+    if (texts.length || imgs.length || files.length) {
       const bubble = el('div', { class: 'user' });
-      if (imgs.length) bubble.append(el('div', { class: 'thumbs' }, imgs.map(src => thumb(src, '附加圖片'))));
-      if (texts.length) bubble.append(el('div', { class: 'utext' }, texts.join('\n\n')));
+      // attachments sent as paths: the list at the end of the text becomes chips (images: thumbnails)
+      let utext = texts.join('\n\n');
+      const pm = utext.match(ATT_PATH_RE);
+      if (pm) {
+        utext = utext.slice(0, pm.index).trim();
+        for (const fp of pm[1].split('\n').map(x => x.replace(/^- /, '').trim()).filter(Boolean))
+          if (IMG_EXT.test(fp)) imgs.push({ path: fp }); else files.push({ path: fp, name: baseName(fp) });
+      }
+      if (imgs.length) bubble.append(el('div', { class: 'thumbs' }, imgs.map(x => x.path ? thumb(fileUrl(x.path), x.path, x.path, true) : thumb(x, '附加圖片'))));
+      if (files.length) bubble.append(el('div', { class: 'fchips' }, files.map(fileChip)));
+      if (utext) bubble.append(el('div', { class: 'utext' }, utext));
       insert(bubble);
     }
     return;

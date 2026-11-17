@@ -473,6 +473,27 @@ img.thumb:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--bord
 .att img { height: 64px; border-radius: 7px; border: 1px solid var(--border); cursor: zoom-in; display: block; }
 .att .x { position: absolute; top: -6px; right: -6px; border: 1px solid var(--border2); border-radius: 50%; width: 18px; height: 18px; background: var(--elev); color: var(--text); cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow-card); }
 .att .x:hover { background: var(--err); border-color: var(--err); color: #fff; }
+/* attached PDF / text file: icon + name + size (attachment bar and sent messages) */
+.fchips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.fchip { display: inline-grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 8px; align-items: center; max-width: 240px; padding: 7px 12px 7px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); }
+.att.file .fchip { height: 64px; box-sizing: border-box; }
+.att { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+/* 本體／路徑 switch under each attachment */
+.amode { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; align-self: stretch; }
+.amode button { flex: 1; border: 0; background: var(--panel); color: var(--muted); font: inherit; font-size: 11px; padding: 2px 8px; cursor: pointer; }
+.amode button + button { border-left: 1px solid var(--border); }
+.amode button.on { background: var(--accent); color: var(--accent-ink); }
+.amode button:disabled { cursor: not-allowed; opacity: .45; }
+/* 路徑 mode: the slot is just the path as text, filling the same box (too long = cut off) */
+.apath { width: 240px; height: 64px; box-sizing: border-box; padding: 5px 8px; overflow: hidden; word-break: break-all; font-family: Consolas, 'Cascadia Mono', monospace; font-size: 11.5px; line-height: 1.35; color: var(--text); background: var(--panel); border: 1px dashed var(--border2); border-radius: 7px; cursor: pointer; }
+.apath:hover { border-color: var(--accent); }
+.apath.muted { color: var(--muted); cursor: default; }
+.apath.err { color: var(--err); border-color: var(--err); }
+.fchip.link { cursor: pointer; }
+.fchip.link:hover { border-color: var(--accent); }
+.fchip svg { grid-row: 1 / 3; color: var(--accent); }
+.fchip .fname { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fchip .fmeta { font-size: 11px; color: var(--muted); }
 /* 輸入卡片：上面輸入框、下面一排控制項，整張卡片一起亮起 */
 .inputwrap { border: 1px solid var(--border2); border-radius: 13px; background: var(--panel); padding: 10px 10px 8px 14px; box-shadow: var(--shadow-card); transition: border-color .15s, box-shadow .2s; }
 .inputwrap:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, var(--border2)); box-shadow: var(--ring), var(--shadow-card); }
@@ -494,6 +515,8 @@ img.thumb:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--bord
 .btn.sendbtn { height: 32px; padding: 0 12px 0 14px; border-radius: 8px; margin-left: 2px; gap: 6px; }
 .btn.stopbtn { height: 32px; border-radius: 8px; gap: 6px; }
 .btn.stopbtn svg { width: 11px; height: 11px; }
+/* 停止鈕不在時仍佔住位置（只是看不見），左邊的 icon / token 條就不會隨著執行狀態左右晃 */
+.btn.stopbtn[hidden] { display: inline-flex !important; visibility: hidden; } /* !important：要蓋過全域的 [hidden] { display: none !important } */
 @container (max-width: 960px) { .sel > span, .ctxlabel { display: none; } }
 @container (max-width: 780px) { .ctxbar { display: none; } }
 @container (max-width: 600px) { #ctxMeter { display: none !important; } .crow { gap: 2px; } .crow > .btn.icon { width: 26px; min-width: 26px; } .crow > .btn { padding-left: 9px; padding-right: 9px; } }

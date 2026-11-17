@@ -14,6 +14,9 @@ const APP_DIR = __dirname;
 const DATA_DIR = path.join(APP_DIR, 'data');
 // 「不指定資料夾」的對話都開在這一個資料夾（像 Desktop 的無專案對話）；第一次用時才建立
 const NOFOLDER_DIR = path.join(os.homedir(), '.claude-controller', 'no-folder');
+// 「附加路徑」的檔案：瀏覽器拿不到拖進來的檔案的原始路徑，所以複製一份到這裡，把這個路徑交給 Claude 自己讀
+const ATTACH_DIR = path.join(os.homedir(), '.claude-controller', 'attachments');
+const UPLOAD_MAX = 1024 * 1024 * 1024;
 const PUBLIC_DIR = path.join(APP_DIR, 'public');
 const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
@@ -307,6 +310,11 @@ function simplify(role, content, ts, uuid) {
     switch (b.type) {
       case 'text': { const t = role === 'user' ? cleanUserText(b.text) : String(b.text || ''); if (t.trim()) blocks.push({ type: 'text', text: t }); break; }
       case 'image': { const s = imgSrc(b.source); if (s) blocks.push({ type: 'image', src: s }); break; }
+      case 'document': { // attached PDF / text file: the page only needs a label, not the contents
+        const src = b.source || {}, pdf = src.media_type === 'application/pdf';
+        const size = src.type === 'base64' && src.data ? Math.floor(src.data.length * 3 / 4) : src.type === 'text' && typeof src.data === 'string' ? Buffer.byteLength(src.data) : 0;
+        blocks.push({ type: 'file', kind: pdf ? 'pdf' : 'text', name: b.title || (pdf ? 'PDF 文件' : '文字檔'), size }); break;
+      }
       case 'thinking': if (b.thinking && b.thinking.trim()) blocks.push({ type: 'thinking', text: b.thinking }); break;
       case 'tool_use': case 'server_tool_use': blocks.push({ type: 'tool_use', id: b.id, name: b.name, input: truncDeep(b.input || {}) }); break;
       case 'tool_result': {
@@ -403,12 +411,20 @@ function setActivity(run, text) { run.activity = text; broadcast({ type: 'activi
 function writeCtl(run, obj) { try { run.proc.stdin.write(JSON.stringify(obj) + '\n'); } catch {} }
 
 // opts.acct: start claude on this account instead of the one in use (used to compact on the previous account)
+// images: the page's attachments — pictures ({ mediaType, data }) and files the API reads natively, sent as
+// `document` blocks: { kind: 'pdf', data (base64), name } and { kind: 'text', text, name }
 async function sendMessage(id, text, images, opts = {}) {
   const r = rec(id);
   if (!r.cwd) r.cwd = sessionCwd(id);
   if (!r.cwd || !fs.existsSync(r.cwd)) throw new Error('工作資料夾不存在: ' + (r.cwd || '(未設定)'));
   const content = [];
-  for (const im of images || []) content.push({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.data } });
+  for (const im of images || []) {
+    if (!im) continue;
+    const title = String(im.name || '').slice(0, 200) || undefined;
+    if (im.kind === 'pdf' && im.data) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: im.data }, title });
+    else if (im.kind === 'text' && typeof im.text === 'string') content.push({ type: 'document', source: { type: 'text', media_type: 'text/plain', data: im.text }, title });
+    else if (!im.kind && im.data) content.push({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.data } });
+  }
   if (text) content.push({ type: 'text', text });
   if (!content.length) throw new Error('空白訊息');
   const userLine = JSON.stringify({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: id }) + '\n';
@@ -463,6 +479,7 @@ async function sendMessage(id, text, images, opts = {}) {
   if (model) args.push('--model', model);
   if (effort) args.push('--effort', effort);
   args.push('--permission-mode', permissionMode);
+  try { fs.mkdirSync(ATTACH_DIR, { recursive: true }); args.push('--add-dir', ATTACH_DIR); } catch {} // 附加路徑的檔案放這裡：讓 Claude 不用另外要權限就能讀
   log('spawn', r.cwd, acct === ACC.MAIN ? '' : '[account ' + ACC.label(acct) + ']', args.join(' '));
   const proc = spawn(CLAUDE_BIN, CLAUDE.pre.concat(args), { cwd: r.cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   // turnActive: a turn is in progress (what the UI shows as "running"). The process can outlive a turn while
@@ -1230,6 +1247,31 @@ let lastClientSeen = Date.now();
 let forceShutdown = false;
 function broadcast(ev) { const s = 'data: ' + JSON.stringify(ev) + '\n\n'; for (const c of clients) { try { c.write(s); } catch {} } }
 function json(res, code, obj) { const b = JSON.stringify(obj); res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(b); }
+// a name that is safe as a Windows file name (keeps the extension, so Claude can tell what it is)
+function safeFileName(n) {
+  n = String(n || '').split(/[\\/]/).pop().replace(/[<>:"|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').trim();
+  if (!n) n = 'file';
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(n)) n = '_' + n;
+  if (n.length > 150) { const ext = path.extname(n).slice(0, 20); n = n.slice(0, 150 - ext.length) + ext; }
+  return n;
+}
+// POST /api/upload?name=…: the raw bytes of one attached file -> a copy in its own folder under ATTACH_DIR
+async function saveUpload(req, name) {
+  const d = new Date(), pad = x => String(x).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  const dir = path.join(ATTACH_DIR, stamp + '-' + crypto.randomBytes(3).toString('hex'));
+  await fsp.mkdir(dir, { recursive: true });
+  const fp = path.join(dir, safeFileName(name));
+  try {
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(fp); let n = 0;
+      req.on('data', c => { n += c.length; if (n > UPLOAD_MAX) { req.unpipe(out); out.destroy(); req.destroy(); reject(new Error('檔案太大（上限 1 GB）')); } });
+      req.on('error', reject); out.on('error', reject); out.on('finish', resolve);
+      req.pipe(out);
+    });
+  } catch (e) { await fsp.rm(dir, { recursive: true, force: true }).catch(() => {}); throw e; }
+  return { path: fp };
+}
 function readBody(req, limit = 80 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = []; let n = 0;
@@ -1473,6 +1515,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/pick-file' && M === 'POST') { const b = await readBody(req); return json(res, 200, { path: await pickFile(normPath(b.initial)) }); }
     if (p === '/api/login' && M === 'POST') { openConsole(os.homedir(), 'claude auth login'); return json(res, 200, { ok: true }); }
     if (p === '/api/auth' && M === 'GET') return json(res, 200, { auth: await refreshAuth() });
+    if (p === '/api/upload' && M === 'POST') return json(res, 200, await saveUpload(req, u.searchParams.get('name')));
     if (p === '/api/reveal' && M === 'POST') {
       const b = await readBody(req); const fp = path.resolve(normPath(b.path));
       if (!fs.existsSync(fp)) return json(res, 404, { error: '找不到: ' + fp });
