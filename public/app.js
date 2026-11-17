@@ -457,7 +457,11 @@ function renderWeb() {
   T.append(bar, view);
   // 頁面裡的 scrollIntoView／focus 會連外層（overflow 被隱藏的）容器一起捲動，造成整個頁面被推到下面：外層一律拉回最上面
   const unscroll = e => { if (e.scrollTop || e.scrollLeft) { e.scrollTop = 0; e.scrollLeft = 0; } };
-  view.addEventListener('scroll', () => unscroll(view)); T.addEventListener('scroll', () => unscroll(T));
+  view.addEventListener('scroll', () => unscroll(view));
+  // T 是這一格共用的捲動區，換回對話後還是同一個元素：這個頁面不在畫面上了就把監聽拿掉，
+  // 否則對話永遠被拉回最上面（滾輪往下沒反應），而且每次重畫都會多掛一個
+  const box = T, onBox = () => { if (!view.isConnected) box.removeEventListener('scroll', onBox); else unscroll(box); };
+  box.addEventListener('scroll', onBox);
   frame.addEventListener('load', () => { unscroll(view); unscroll(T); });
   new ResizeObserver(fit).observe(view); fit();
 }
@@ -2669,7 +2673,17 @@ $('#btnNew').onclick = () => newDraft();
 // 顯示／隱藏「🌐 瀏覽器分頁」群組（左側列表、專注模式、橫向分頁列都跟著；只是藏起來，頁面資料不動）
 S.webShown = ls('cc_showweb') !== '0';
 function renderWebToggle() { const b = $('#btnWebToggle'); b.classList.toggle('on', S.webShown); b.title = S.webShown ? '隱藏瀏覽器分頁群組' : '顯示瀏覽器分頁群組'; }
-$('#btnWebToggle').onclick = () => { S.webShown = !S.webShown; ls('cc_showweb', S.webShown ? '1' : '0'); renderWebToggle(); renderSidebar(); };
+$('#btnWebToggle').onclick = () => { S.webShown = !S.webShown; ls('cc_showweb', S.webShown ? '1' : '0'); renderWebToggle(); if (!S.webShown) exitWebPanes(); renderSidebar(); };
+// 收起瀏覽器分頁群組時，正在顯示網頁的格子也一起退出：右格直接取消分割，左格回到最後使用的對話（沒有就開新對話）
+function exitWebPanes() {
+  if (!PANE.R.el.hidden && pst(PANE.R).web) closeRight();
+  if (!pst(PANE.L).web) return;
+  const last = ls('cc_last');
+  const ok = last && S.sessions.some(s => s.id === last) && (!S.focusKey || inFocusFolder(last));
+  if (ok && !PANE.R.el.hidden && paneShows(PANE.R, last)) closeRight(); // 那個對話已經開在右格：收回左格顯示
+  if (ACTIVE !== PANE.L) setActive(PANE.L);
+  if (ok) openSession(last, PANE.L); else newDraft(S.focusKey ? S.focusCwd : '');
+}
 renderWebToggle();
 $('#btnNewRail').onclick = () => newDraft();
 // 整頁縮進去：收起左側列表，右側（對話區）就多出整個寬度；收起時 » 上的小點代表還有黃／藍點的對話
@@ -3339,7 +3353,8 @@ function btwShow() {
 }
 // 手動關閉（✕／Esc／再按 💬）：只關這個對話的小視窗，內容保留，之後再開還在
 function btwHide() { const st = btwAnchor && btwSt(btwAnchor); if (st) { st.open = false; st.draft = btwIn.value; } if (btwPop) btwPop.hidden = true; btwPane = null; btwAnchor = null; input.focus(); }
-function btwToggle() { if (btwPop && !btwPop.hidden && btwIn === document.activeElement) btwHide(); else btwShow(); }
+// 小視窗開著就關閉（不能看焦點：按下 💬 的瞬間焦點已經移到按鈕上，小視窗輸入欄永遠不會是焦點）
+function btwToggle() { if (btwPop && !btwPop.hidden) btwHide(); else btwShow(); }
 function runBtw(text) {
   text = String(text || '').trim(); if (!text) return;
   const sid = btwAnchor;
