@@ -10,7 +10,7 @@ foreach ($t in $targets) {
   $s.TargetPath = "$env:WINDIR\System32\wscript.exe"
   $s.Arguments = '"' + (Join-Path $dir 'start.vbs') + '"'
   $s.WorkingDirectory = $dir
-  $s.IconLocation = "$env:WINDIR\System32\imageres.dll,262"
+  $s.IconLocation = (Join-Path $dir 'public\icon.ico') + ',0'
   $s.Description = 'Claude CLI Controller'
   $s.Save()
   Write-Output "Created: $t"
