@@ -1895,15 +1895,18 @@ function renderUFly() {
       tip.push(`${RATE_NAMES[k]}：` + (has ? `已用 ${pct}%` + (expired ? '（已重置）' : v.resetsAt ? `，${fmtWhen(v.resetsAt * 1000)} 重置` : '') : '尚無資料'));
     });
     tip.push(r && r.receivedAt ? `${fmtWhen(r.receivedAt)} 更新` + (stale ? '（超過 1 小時，數字可能已經變了）' : '') : '還沒有這個帳號的用量資料（用它跑過一次對話後就會有）');
+    tip.push('', viewSession() ? '點一下：把這個對話改用這個帳號（會先確認）' : '點一下：之後新開的對話改用這個帳號');
     col.title = tip.join('\n');
+    col.onclick = () => { closeUFly(); switchAccount(x.id); };
     fly.append(col);
   }
 }
+$('#uAcct').onclick = () => { if (!$('#uMore').hidden) $('#uMore').click(); }; // 點帳號名稱也能打開小卡
 $('#uMore').onclick = () => {
   if (!$('#uFly').hidden) { closeUFly(); return; }
   $('#uFly').hidden = false; $('#uMore').classList.add('on'); renderUFly();
 };
-document.addEventListener('mousedown', e => { if (!$('#uFly').hidden && !e.target.closest('#uFly') && !e.target.closest('#uMore')) closeUFly(); });
+document.addEventListener('mousedown', e => { if (!$('#uFly').hidden && !e.target.closest('#uFly') && !e.target.closest('#uMore') && !e.target.closest('#uAcct')) closeUFly(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeUFly(); });
 addEventListener('resize', () => closeUFly());
 
@@ -1955,12 +1958,12 @@ function renderAccounts(a) {
 // the corner: account selector, its alert and its usage, for the conversation shown
 function renderAcctView() {
   const a = S.accounts; if (!a) return;
-  const sel = $('#uAcct'), cur = viewAcct(), s = viewSession();
-  sel.innerHTML = '';
-  for (const x of a.list) sel.append(el('option', { value: x.id }, `${acctKind(x)}｜${x.label}` + (acctBad(x) ? `（${x.status.text}）` : '')));
-  sel.value = cur; sel.hidden = a.list.length < 2;
-  sel.title = s ? '這個對話固定使用的帳號（換這裡只會改這個對話）' : '新對話要用的帳號';
-  sel.classList.toggle('bad', acctBad(acctOf(cur)));
+  // 只顯示帳號名稱；要換帳號從右邊 > 的小卡點選
+  const box = $('#uAcct'), cur = viewAcct(), s = viewSession(), x = acctOf(cur);
+  box.replaceChildren(...(x ? [el('span', { class: 'acctkind' + (x.kind === 'main' ? ' main' : '') }, acctKind(x)), el('span', { class: 'uan' }, x.label)] : []));
+  box.hidden = !x;
+  box.title = x ? (s ? '這個對話固定使用的帳號：' : '新對話要用的帳號：') + acctName(x) + (acctBad(x) ? `（${x.status.text}）` : '') + (a.list.length > 1 ? '\n要換帳號：按右邊的 >，在小卡上點選' : '') : '';
+  box.classList.toggle('bad', acctBad(x));
   renderAcctAlert();
   renderRate();
 }
@@ -1999,7 +2002,6 @@ async function switchAccount(id) {
     return true;
   } catch (e) { toast(e.message, 6000); renderAcctView(); return false; }
 }
-$('#uAcct').onchange = e => switchAccount(e.target.value);
 // a problem found after something was sent (quota used up, token rejected, CLI logged out / changed):
 // toast + a line in the conversation it happened in + a desktop notification when the window is not in front
 function acctWarn(ev, inShown) {
@@ -2055,7 +2057,7 @@ function accountRows() {
     try {
       const d = await api('POST', '/api/accounts', { label: lab.value, token: tok.value });
       S.acctForm = false; renderAccounts(d.accounts); renderSettings();
-      toast(`已加入副帳號「${lab.value.trim()}」。可以在左下「用量」旁邊切換帳號`, 7000);
+      toast(`已加入副帳號「${lab.value.trim()}」。可以按左下「用量」右邊的 >，在小卡上點選切換帳號`, 7000);
     } catch (e) { toast(e.message, 8000); go.disabled = false; go.textContent = '驗證並加入'; }
   };
   rows.push(el('div', { class: 'acctform' },

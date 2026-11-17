@@ -100,7 +100,7 @@ module.exports = function createAccounts({ store, saveStore, log, broadcast, cle
     log('account warn', id, level, text.replace(/\n/g, ' '));
     broadcast({ type: 'acctWarn', acct: id, level, text, sid: sid || null });
   }
-  const switchHint = id => store.accounts.length || id !== MAIN ? '可以在這個對話裡用左下「用量」旁的選單把它換到其他帳號，再送一次訊息就能接著聊（對話紀錄共用）。' : '可以到 ⚙ 設定 → 帳號新增副帳號，額度用完時切換過去接著聊。';
+  const switchHint = id => store.accounts.length || id !== MAIN ? '可以按左下「用量」右邊的 >，在小卡上點其他帳號，把這個對話換過去，再送一次訊息就能接著聊（對話紀錄共用）。' : '可以到 ⚙ 設定 → 帳號新增副帳號，額度用完時切換過去接著聊。';
 
   // ---------- usage ----------
   // rate_limit_event from any claude we ran on this account: keep it, and update the limited / near-limit state
